@@ -173,6 +173,44 @@ base image の PyTorch 2.7.0 と torchaudio 2.7.0 が一致しているか `requ
 
 ---
 
+## 開発フロー（GitHub Flow）
+
+このリポジトリは **GitHub Flow** を採用しています。
+
+### 基本ルール
+
+- `main` ブランチは常にクリーンな状態を保つ（直接コミット禁止）
+- 作業は Issue に対応したフィーチャーブランチで行う
+- すべての変更は Pull Request 経由でマージする
+
+### ブランチ命名
+
+```
+<type>/issue-<N>-<短い説明>
+```
+
+例: `feature/issue-1-fix-torchaudio-cuda` / `fix/issue-2-transformers-warning` / `docs/issue-12-validation-results`
+
+### 作業手順
+
+```bash
+# 1. main から作業ブランチを作成
+git switch -c feature/issue-N-description
+
+# 2. 作業・コミット
+git add <files>
+git commit -m "fix: torchaudio cuda compatibility"
+
+# 3. PR を作成（Issue を自動クローズ）
+gh pr create --title "..." --body "Closes #N"
+
+# 4. レビュー・CI 確認後にマージ → ブランチ削除
+```
+
+詳細なルールは [CLAUDE.md](CLAUDE.md) の「Git 運用戦略」セクションを参照。
+
+---
+
 ## ライセンス
 
 - **Qwen3-TTS モデル**: [Apache 2.0](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base)

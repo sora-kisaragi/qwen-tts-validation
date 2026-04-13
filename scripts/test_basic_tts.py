@@ -8,15 +8,17 @@ Usage:
     docker compose run qwen-tts python3 scripts/test_basic_tts.py
 """
 
+import pathlib
 import sys
 import time
-import pathlib
 from datetime import datetime
+from typing import Any
 
 try:
+    import numpy as np
     import torch
 except ImportError:
-    print("ERROR: torch not found. Are you running inside the Docker container?")
+    print("ERROR: torch/numpy not found. Are you running inside the Docker container?")
     sys.exit(1)
 
 try:
@@ -54,7 +56,7 @@ TEST_CASES = [
 ]
 
 
-def check_environment():
+def check_environment() -> None:
     print("=" * 60)
     print("Environment Check")
     print("=" * 60)
@@ -71,14 +73,23 @@ def check_environment():
     print()
 
 
-def synthesize(model, text: str, output_path: pathlib.Path) -> dict:
+def synthesize(model: Any, text: str, output_path: pathlib.Path) -> dict[str, Any]:
+    """テキストを音声合成し、WAV ファイルへ保存する。
+
+    Args:
+        model: QwenTTS モデルインスタンス。
+        text: 合成対象のテキスト。
+        output_path: 出力先 WAV ファイルパス。
+
+    Returns:
+        出力パス・再生時間・推論時間・最大振幅・サンプルレートを含む辞書。
+    """
     start = time.time()
     audio, sample_rate = model(text)
     elapsed = time.time() - start
 
     sf.write(str(output_path), audio, sample_rate)
 
-    import numpy as np
     max_amplitude = float(np.abs(audio).max())
     duration = len(audio) / sample_rate
 
@@ -91,7 +102,7 @@ def synthesize(model, text: str, output_path: pathlib.Path) -> dict:
     }
 
 
-def run_tests():
+def run_tests() -> None:
     check_environment()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

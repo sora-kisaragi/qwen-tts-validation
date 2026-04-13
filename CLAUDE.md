@@ -20,19 +20,151 @@ Docker 環境で動作させ、以下を検証するプロジェクト:
 
 ## Docker Conventions
 
-<!-- TODO: ユーザーの Docker 規約をここに記載してください -->
-<!-- 例: イメージ命名規則、volume の扱い、GPU パススルーの方法など -->
+### 基本方針
 
-[PLACEHOLDER — Docker の個人規約・手順書を後で提供してください]
+- **Docker Desktop は使用しない**（商用ライセンス問題のため）。Linux では Docker Engine を直接使用。
+- `docker compose`（スペースあり）を使用する（旧 `docker-compose` は使用しない）。
+- `sudo` なしで `docker` を実行できる設定（`docker` グループへの追加）を前提とする。
+
+### Compose ファイル構成
+
+```
+project/
+  ├─ docker-compose.yml          # 共通設定（ベース）
+  ├─ docker-compose.override.yml # 開発環境の上書き設定（自動適用）
+  └─ docker-compose.prod.yml     # 本番環境の上書き設定
+```
+
+- 開発環境: `docker compose up -d`（override.yml が自動適用）
+- 本番環境: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`
+
+### データ永続化
+
+- **Named Volume を推奨**（コンテナとホストを疎結合に保つ）。
+- Bind Mount はソースコード共有・ホットリロード目的に限定。
+- `docker compose down -v` はボリューム削除を伴うため、DB データ消失に注意。
+
+### 機密情報
+
+- パスワード等は `.env` ファイルに定義し、`docker-compose.yml` から参照する。
+- `.env` は `.gitignore` に追加してリポジトリに含めない。
+
+### キャッシュ管理
+
+- 定期的に `docker system df` で使用量を確認する。
+- 不要リソースの削除: `docker system prune`（ボリュームも含める場合は `--volumes` を付与、要注意）。
+
+### このプロジェクト固有のルール
+
+- GPU パススルー: `runtime: nvidia` + `NVIDIA_VISIBLE_DEVICES=all`（NVIDIA Container Toolkit 前提）。
+- モデルキャッシュ（~3.4GB）は named volume (`hf_cache`, `torch_cache`) で永続化する。
+- 生成音声 (`output/`) は bind mount でホストから即座に確認できるようにする。
 
 ---
 
 ## Python Conventions
 
-<!-- TODO: ユーザーの Python 規約をここに記載してください -->
-<!-- 例: コーディングスタイル、パッケージ管理、型ヒントの方針など -->
+### コードスタイル
 
-[PLACEHOLDER — Python の個人規約・手順書を後で提供してください]
+- インデント: スペース4（タブ禁止）
+- 行の長さ: 120文字以内（black / ruff で統一）
+- 文字コード: UTF-8
+- import 順序: 標準ライブラリ → サードパーティ → アプリ内部
+- ツール: `ruff`（Lint）、`black`（フォーマット）、`mypy`（型チェック）
+
+### 命名規則
+
+| 対象 | 規則 | 例 |
+|------|------|----|
+| 変数・関数 | snake_case | `fetch_user`, `user_name` |
+| クラス | PascalCase | `UserService` |
+| 定数 | UPPER_SNAKE_CASE | `DEFAULT_TIMEOUT` |
+| ファイル名 | snake_case | `test_basic_tts.py` |
+
+### 型ヒント
+
+- すべての関数に引数・返却値の型を付与する。
+- 戻り値がない場合は `-> None` を明記する。
+- Union は `|` 記法（Python 3.10+）: `str | None`
+
+### ファイルヘッダー（モジュール Docstring）
+
+`src/` 配下のアプリコードには以下のヘッダーを `import` より前に記載する:
+
+```python
+"""
+<ファイルの概要を1行で>
+
+- 目的: <このファイルの責務>
+- 対象: <主な利用者>
+- 関連: <設計書ID / チケットID など>
+
+作成者: 宗廣 颯真
+作成日: YYYY-MM-DD
+最終更新者: 宗廣 颯真
+最終更新日: YYYY-MM-DD
+"""
+```
+
+### Docstring（Google スタイル）
+
+- 1行目: 何をするか簡潔に記述。
+- セクション順: `Args:` → `Returns:` → `Raises:` → `Examples:`
+- 型は型ヒントに一本化し、Docstring に重複記載しない。
+- `dict[str, Any]` 等で抽象的になる場合は期待するキー・構造を説明する。
+
+```python
+def fetch_user(user_id: int) -> User:
+    """ユーザーIDを指定してユーザー情報を取得する。
+
+    Args:
+        user_id: 対象ユーザーID。正の整数であること。
+
+    Returns:
+        ユーザーエンティティ。
+
+    Raises:
+        UserNotFound: 指定したIDのユーザーが存在しない場合。
+    """
+```
+
+### コメント
+
+- コメントは "Why（なぜそうするか）" を書く（"What" はコードから読み取れるため不要）。
+- 処理段階が複数ある関数では、各ブロック前に処理単位コメントを入れる。
+- `""" """` は Docstring 専用。コメント目的での使用禁止。
+
+### エラーハンドリング
+
+- 空の `except:` 禁止。`except Exception:` の乱用禁止。
+- ログを書かずに例外を無視する行為禁止。
+- 想定する例外型を捕捉し、コンテキストをログに残してから再 raise する。
+
+### ログ
+
+- `print` デバッグ禁止。`logging` または `structlog` を使用。
+- `user_id` / `trace_id` を含める。JSON 形式を推奨。
+
+### セキュリティ
+
+- `eval` / `exec` 禁止。
+- Secrets（APIキー・パスワード等）の直書き禁止。
+- `requests` は `timeout` を必須設定。
+
+### 禁止事項
+
+- 未使用変数・未使用 import
+- マジックナンバー
+- 例外の握りつぶし
+- 過度な if-else ネスト（3段以内）
+- グローバル変数の乱用
+- 過度な抽象化・不要なクラス化
+
+### このプロジェクトでの環境構築
+
+- Docker コンテナ内で pip を使用（ローカルに venv は作らない）。
+- 依存関係は `requirements.txt` にピン留め（`package==version` 形式）。
+- pyenv / poetry / uv はコンテナ内では使用しない。
 
 ---
 

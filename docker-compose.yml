@@ -14,6 +14,8 @@ services:
       - HF_HOME=/workspace/.cache/huggingface
       - TRANSFORMERS_CACHE=/workspace/.cache/huggingface
       - TORCH_HOME=/workspace/.cache/torch
+      # Reduce CUDA memory fragmentation on GB10 unified memory (ref: article)
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     volumes:
       # Bind mounts: editable without rebuilding the image
       - ./scripts:/workspace/scripts:ro

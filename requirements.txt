@@ -1,16 +1,12 @@
 # Qwen-TTS validation requirements
-# Note: torch is provided by the NGC base image — do NOT reinstall
-#       Base image: nvcr.io/nvidia/pytorch:25.03-py3 (PyTorch 2.7.0, CUDA 12.8)
+# Note: torch 2.9.1 + torchaudio 2.9.1 are installed separately in Dockerfile
+#       via --index-url https://download.pytorch.org/whl/cu130 (ARM64 cu130 wheels).
+#       Do NOT list them here to avoid pip resolving from PyPI.
 
 # TTS
 qwen-tts==0.1.1
 
-# torchaudio: installed separately in Dockerfile with --no-deps
-# Reason: NGC base image has torch==2.7.0a0+7c8ec84dab.nv25.3 (custom build string),
-#         which conflicts with torchaudio's exact torch==2.7.0 requirement.
-#         --no-deps bypasses the version check; the underlying binary is compatible.
-
-# qwen-tts pins these; explicit here for reproducibility
+# qwen-tts pins transformers==4.57.3; explicit here for reproducibility
 transformers==4.57.3
 accelerate>=0.26.0
 

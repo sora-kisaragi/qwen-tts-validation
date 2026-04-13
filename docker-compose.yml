@@ -1,0 +1,35 @@
+services:
+  qwen-tts:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen-tts-validation:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Set HF_TOKEN in your shell environment if needed for gated model variants
+      # Public models (Qwen/Qwen3-TTS-12Hz-1.7B-Base) do not require a token
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/workspace/.cache/huggingface
+      - TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+      - TORCH_HOME=/workspace/.cache/torch
+    volumes:
+      # Bind mounts: editable without rebuilding the image
+      - ./scripts:/workspace/scripts:ro
+      - ./sample_audio:/workspace/sample_audio:ro
+      # Output: bind mount so generated audio is immediately accessible on host
+      - ./output:/workspace/output
+      # Named volumes: persist model weights across container rebuilds
+      - hf_cache:/workspace/.cache/huggingface
+      - torch_cache:/workspace/.cache/torch
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: bash
+
+volumes:
+  hf_cache:
+    driver: local
+  torch_cache:
+    driver: local

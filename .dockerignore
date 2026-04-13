@@ -1,0 +1,24 @@
+# Git
+.git/
+.gitignore
+
+# Cache and output (use Docker volumes instead)
+.cache/
+output/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+*.env
+
+# Docs (not needed in container)
+docs/
+README.md
+CLAUDE.md

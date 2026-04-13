@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Model weights cache (large files, use Docker named volumes)
+.cache/
+
+# Generated audio output
+output/*.wav
+output/*.mp3
+output/*/
+
+# Voice cloning samples (may contain personal audio)
+sample_audio/*.wav
+sample_audio/*.mp3
+sample_audio/*.flac
+sample_audio/*.m4a
+
+# Environment variables
+.env
+*.env
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker build artifacts
+*.tar

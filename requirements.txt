@@ -1,0 +1,19 @@
+# Qwen-TTS validation requirements
+# Note: torch is provided by the NGC base image — do NOT reinstall
+#       Base image: nvcr.io/nvidia/pytorch:25.03-py3 (PyTorch 2.7.0, CUDA 12.8)
+
+# TTS
+qwen-tts==0.1.1
+
+# torchaudio: pin to match base image's PyTorch 2.7.0
+torchaudio==2.7.0
+
+# qwen-tts pins these; explicit here for reproducibility
+transformers==4.57.3
+accelerate>=0.26.0
+
+# Voice cloning: transcription (ARM64: runs on CPU, triton not available)
+openai-whisper
+
+# Audio I/O
+soundfile

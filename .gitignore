@@ -22,6 +22,12 @@ sample_audio/*.m4a
 .env
 *.env
 
+# Claude Code
+# settings.json はプロジェクト共有設定のため追跡する
+# memory/ など個人データは除外
+.claude/*
+!.claude/settings.json
+
 # Editor
 .vscode/
 .idea/

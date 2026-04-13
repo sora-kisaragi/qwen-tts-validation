@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh --version)",
+      "Bash(docker buildx:*)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\)[0]; print\\('Config:', json.dumps\\(d.get\\('Config',{}\\), indent=2\\)[:3000]\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\)[0]; cfg=d.get\\('ContainerConfig',{}\\); print\\('Env:', cfg.get\\('Env',[]\\)\\); print\\('Cmd:', cfg.get\\('Cmd',[]\\)\\); print\\('Labels:', cfg.get\\('Labels',{}\\)\\)\")",
+      "Bash(docker history:*)",
+      "Bash(nvidia-smi)",
+      "Bash(nvcc --version)",
+      "Bash(docker run:*)"
+    ]
+  }
+}

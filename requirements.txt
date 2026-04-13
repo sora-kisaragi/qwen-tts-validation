@@ -5,8 +5,10 @@
 # TTS
 qwen-tts==0.1.1
 
-# torchaudio: pin to match base image's PyTorch 2.7.0
-torchaudio==2.7.0
+# torchaudio: installed separately in Dockerfile with --no-deps
+# Reason: NGC base image has torch==2.7.0a0+7c8ec84dab.nv25.3 (custom build string),
+#         which conflicts with torchaudio's exact torch==2.7.0 requirement.
+#         --no-deps bypasses the version check; the underlying binary is compatible.
 
 # qwen-tts pins these; explicit here for reproducibility
 transformers==4.57.3

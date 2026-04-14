@@ -18,6 +18,9 @@ sample_audio/*.mp3
 sample_audio/*.flac
 sample_audio/*.m4a
 
+# Speaker profiles (contain speaker embeddings extracted from personal audio)
+speaker_profiles/*.pt
+
 # Environment variables
 .env
 *.env

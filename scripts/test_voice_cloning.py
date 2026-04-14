@@ -12,12 +12,21 @@ Prerequisites:
         ffmpeg -y -i input.mp3 -ac 1 -ar 24000 sample_audio/reference.wav
 
 Usage:
-    # 参照音声から都度生成（Whisper 文字起こしあり）
-    docker compose run qwen-tts python3 scripts/test_voice_cloning.py
+    # (A) 参照音声 + テキスト手動入力（Whisper 不要・ICL モード）
+    docker compose run qwen-tts python3 scripts/test_voice_cloning.py \\
+        --ref-audio sample_audio/reference.wav \\
+        --ref-text "参照音声に話されている内容をここに入力します。"
 
-    # 事前作成した話者プロファイルを再利用（文字起こし不要・高速）
+    # (B) 参照音声のみ（Whisper で自動文字起こし・ICL モード）
+    docker compose run qwen-tts python3 scripts/test_voice_cloning.py \\
+        --ref-audio sample_audio/reference.wav
+
+    # (C) 事前作成した話者プロファイルを再利用（最速）
     docker compose run qwen-tts python3 scripts/test_voice_cloning.py \\
         --profile speaker_profiles/default.pt
+
+    # (D) 引数なし: sample_audio/ を自動検出して Whisper 文字起こし
+    docker compose run qwen-tts python3 scripts/test_voice_cloning.py
 """
 
 import argparse
@@ -39,12 +48,6 @@ try:
     import soundfile as sf
 except ImportError:
     print("ERROR: soundfile not found.")
-    sys.exit(1)
-
-try:
-    import whisper
-except ImportError:
-    print("ERROR: openai-whisper not found. Run: pip install openai-whisper")
     sys.exit(1)
 
 try:
@@ -120,12 +123,22 @@ def prepare_audio(source_path: pathlib.Path, output_path: pathlib.Path) -> bool:
 def transcribe_audio(audio_path: pathlib.Path) -> str:
     """Whisper で参照音声を文字起こしする。
 
+    --ref-text が指定されている場合はこの関数を呼ばない。
+    Whisper は ARM64 では CPU 実行になるため低速（数十秒）。
+
     Args:
         audio_path: 文字起こし対象の WAV ファイルパス。
 
     Returns:
         文字起こしテキスト。
     """
+    try:
+        import whisper
+    except ImportError:
+        print("ERROR: openai-whisper not found. Run: pip install openai-whisper")
+        print("Alternatively, pass --ref-text to skip transcription.")
+        sys.exit(1)
+
     print("  Transcribing reference audio with Whisper (base model, CPU)...")
     # ARM64: triton not available, Whisper uses CPU
     whisper_model = whisper.load_model("base", device="cpu")
@@ -192,19 +205,52 @@ def clone_and_synthesize(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="TC-06: Voice cloning test")
+    parser = argparse.ArgumentParser(
+        description="TC-06: Voice cloning test",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Modes (mutually exclusive):\n"
+            "  --profile             : reuse pre-built speaker profile (fastest)\n"
+            "  --ref-audio + --ref-text: ICL mode, no Whisper needed\n"
+            "  --ref-audio           : ICL mode, Whisper auto-transcription\n"
+            "  (none)                : auto-discover sample_audio/ + Whisper\n"
+        ),
+    )
     parser.add_argument(
         "--profile",
         type=pathlib.Path,
         default=None,
         metavar="PATH",
         help=(
-            "Path to a pre-built speaker profile (.pt). "
-            "If specified, skips reference audio processing and Whisper transcription. "
+            "Pre-built speaker profile (.pt). "
+            "Skips reference audio processing entirely. "
             "Create with: python3 scripts/create_speaker_profile.py"
         ),
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--ref-audio",
+        type=pathlib.Path,
+        default=None,
+        metavar="PATH",
+        help="Reference audio file (any format; converted to 24kHz mono internally).",
+    )
+    parser.add_argument(
+        "--ref-text",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Transcript of the reference audio. " "Enables ICL mode without running Whisper. " "Requires --ref-audio."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.profile and args.ref_audio:
+        parser.error("--profile and --ref-audio are mutually exclusive.")
+    if args.ref_text and not args.ref_audio:
+        parser.error("--ref-text requires --ref-audio.")
+
+    return args
 
 
 def run_tests() -> None:
@@ -229,16 +275,49 @@ def run_tests() -> None:
     )
     print("Model loaded.\n")
 
-    # --- 話者プロファイルの準備 ---
+    # --- 話者プロファイル / 参照音声の準備 ---
     if args.profile is not None:
-        # 事前生成プロファイルを再利用（参照音声の再処理なし）
+        # (C) 事前生成プロファイルを再利用（参照音声の再処理なし・最速）
         print(f"Mode: profile reuse ({args.profile})")
         speaker_profile = load_speaker_profile(args.profile, device=device)
         ref_label = args.profile.stem
         ref_audio_for_result = None
         ref_text_for_result = None
+
+    elif args.ref_audio is not None:
+        if not check_ffmpeg():
+            sys.exit(1)
+        if not args.ref_audio.exists():
+            print(f"ERROR: Reference audio not found: {args.ref_audio}")
+            sys.exit(1)
+
+        prepared_path = output_dir / f"prepared_{args.ref_audio.stem}.wav"
+        print(f"  Preparing audio (24kHz mono WAV): {args.ref_audio.name}")
+        if not prepare_audio(args.ref_audio, prepared_path):
+            print(f"  FAIL: Could not prepare {args.ref_audio.name}")
+            sys.exit(1)
+
+        if args.ref_text is not None:
+            # (A) テキスト手動入力（Whisper 不要・ICL モード）
+            print(f"Mode: manual ref-text + ref-audio ({args.ref_audio.name})")
+            reference_text = args.ref_text
+            print(f"  Ref text: {reference_text}")
+        else:
+            # (B) 参照音声のみ（Whisper 自動文字起こし・ICL モード）
+            print(f"Mode: whisper transcription ({args.ref_audio.name})")
+            try:
+                reference_text = transcribe_audio(prepared_path)
+            except RuntimeError as e:
+                print(f"  FAIL: Transcription error: {e}")
+                sys.exit(1)
+
+        speaker_profile = None
+        ref_label = args.ref_audio.stem
+        ref_audio_for_result = prepared_path
+        ref_text_for_result = reference_text
+
     else:
-        # 参照音声を都度処理（Whisper 文字起こし + エンコード）
+        # (D) 引数なし: sample_audio/ を自動検出 + Whisper 文字起こし
         if not check_ffmpeg():
             sys.exit(1)
 
@@ -252,7 +331,7 @@ def run_tests() -> None:
             sys.exit(1)
 
         ref_file = sample_files[0]
-        print(f"Mode: reference audio ({ref_file.name})")
+        print(f"Mode: auto-discover + whisper ({ref_file.name})")
         prepared_path = output_dir / f"prepared_{ref_file.stem}.wav"
         print("  Preparing audio (24kHz mono WAV)...")
         if not prepare_audio(ref_file, prepared_path):

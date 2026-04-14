@@ -11,9 +11,16 @@
 最終更新日: 2026-04-14
 
 Usage:
+    # x-vector のみ（文字起こし不要・シンプル）
     docker compose run qwen-tts python3 scripts/create_speaker_profile.py \\
         --ref-audio sample_audio/reference.wav \\
         --output speaker_profiles/default.pt
+
+    # ICL モード（参照音声のテキストを指定・声質向上）
+    docker compose run qwen-tts python3 scripts/create_speaker_profile.py \\
+        --ref-audio sample_audio/reference.wav \\
+        --ref-text "参照音声で話されている内容をここに入力します。" \\
+        --output speaker_profiles/icl_default.pt
 """
 
 import argparse
@@ -38,12 +45,31 @@ MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate a speaker profile (.pt) from a reference WAV file.")
+    parser = argparse.ArgumentParser(
+        description="Generate a speaker profile (.pt) from a reference WAV file.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Modes:\n"
+            "  (default)  x-vector only  — no transcript needed, fast\n"
+            "  --ref-text ICL mode        — embed ref_text for higher voice similarity\n"
+        ),
+    )
     parser.add_argument(
         "--ref-audio",
         type=pathlib.Path,
         default=pathlib.Path("/workspace/sample_audio/reference.wav"),
         help="Reference WAV file (24kHz mono, 3-10s). Default: /workspace/sample_audio/reference.wav",
+    )
+    parser.add_argument(
+        "--ref-text",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Transcript of the reference audio. "
+            "Enables ICL mode (higher voice similarity). "
+            "If omitted, x-vector only mode is used."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -63,8 +89,12 @@ def main() -> None:
         sys.exit(1)
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    icl_mode = args.ref_text is not None
     print(f"Device         : {device}")
     print(f"Reference audio: {args.ref_audio}")
+    print(f"Mode           : {'ICL (ref_text provided)' if icl_mode else 'x-vector only'}")
+    if icl_mode:
+        print(f"Ref text       : {args.ref_text}")
     print(f"Output profile : {args.output}")
     print()
 
@@ -79,12 +109,20 @@ def main() -> None:
     )
     print("Model loaded.\n")
 
-    print("Extracting speaker embedding...")
-    # x_vector_only_mode=True: 参照音声のトランスクリプト不要（話者埋め込みのみ使用）
-    prompts = model.create_voice_clone_prompt(
-        ref_audio=str(args.ref_audio),
-        x_vector_only_mode=True,
-    )
+    print("Extracting speaker profile...")
+    if icl_mode:
+        # ICL モード: ref_text を埋め込むことで声質の再現度が向上する
+        prompts = model.create_voice_clone_prompt(
+            ref_audio=str(args.ref_audio),
+            ref_text=args.ref_text,
+            x_vector_only_mode=False,
+        )
+    else:
+        # x-vector のみ: テキスト不要（話者埋め込みのみ使用）
+        prompts = model.create_voice_clone_prompt(
+            ref_audio=str(args.ref_audio),
+            x_vector_only_mode=True,
+        )
     # create_voice_clone_prompt はリストを返す
     profile = prompts[0] if isinstance(prompts, list) else prompts
 

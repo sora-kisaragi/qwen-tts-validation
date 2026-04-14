@@ -12,7 +12,6 @@ services:
       # Public models (Qwen/Qwen3-TTS-12Hz-1.7B-Base) do not require a token
       - HF_TOKEN=${HF_TOKEN:-}
       - HF_HOME=/workspace/.cache/huggingface
-      - TRANSFORMERS_CACHE=/workspace/.cache/huggingface
       - TORCH_HOME=/workspace/.cache/torch
       # Reduce CUDA memory fragmentation on GB10 unified memory (ref: article)
       # Note: PYTORCH_CUDA_ALLOC_CONF was renamed to PYTORCH_ALLOC_CONF in torch 2.9

@@ -4,6 +4,12 @@ TC-01, TC-02: Basic TTS test (English)
 Tests text-to-speech synthesis with English input using Qwen3-TTS.
 Saves output WAV files to /workspace/output/basic_tts_<timestamp>/
 
+Note: Qwen3-TTS-12Hz-1.7B-Base requires a reference audio for all synthesis.
+      Place a 3-10 second mono 24kHz WAV at /workspace/sample_audio/reference.wav
+      before running this script.
+
+      ffmpeg -y -i input.mp3 -ss 3 -t 10 -ac 1 -ar 24000 sample_audio/reference.wav
+
 Usage:
     docker compose run qwen-tts python3 scripts/test_basic_tts.py
 """
@@ -28,7 +34,7 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from qwen_tts import QwenTTS
+    from qwen_tts import Qwen3TTSModel
 except ImportError:
     print("ERROR: qwen_tts not found. Run: pip install qwen-tts")
     sys.exit(1)
@@ -36,6 +42,7 @@ except ImportError:
 
 MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 OUTPUT_BASE = pathlib.Path("/workspace/output")
+REFERENCE_AUDIO = pathlib.Path("/workspace/sample_audio/reference.wav")
 
 TEST_CASES = [
     {
@@ -73,21 +80,34 @@ def check_environment() -> None:
     print()
 
 
-def synthesize(model: Any, text: str, output_path: pathlib.Path) -> dict[str, Any]:
+def synthesize(
+    model: Any,
+    text: str,
+    output_path: pathlib.Path,
+    ref_audio: str,
+    ref_text: str,
+) -> dict[str, Any]:
     """テキストを音声合成し、WAV ファイルへ保存する。
 
     Args:
-        model: QwenTTS モデルインスタンス。
+        model: Qwen3TTSModel インスタンス。
         text: 合成対象のテキスト。
         output_path: 出力先 WAV ファイルパス。
+        ref_audio: 参照音声ファイルパス（24kHz mono WAV）。
+        ref_text: 参照音声の書き起こしテキスト。
 
     Returns:
         出力パス・再生時間・推論時間・最大振幅・サンプルレートを含む辞書。
     """
     start = time.time()
-    audio, sample_rate = model(text)
+    wavs, sample_rate = model.generate_voice_clone(
+        text,
+        ref_audio=ref_audio,
+        ref_text=ref_text,
+    )
     elapsed = time.time() - start
 
+    audio = wavs[0]
     sf.write(str(output_path), audio, sample_rate)
 
     max_amplitude = float(np.abs(audio).max())
@@ -105,15 +125,34 @@ def synthesize(model: Any, text: str, output_path: pathlib.Path) -> dict[str, An
 def run_tests() -> None:
     check_environment()
 
+    if not REFERENCE_AUDIO.exists():
+        print(f"ERROR: Reference audio not found: {REFERENCE_AUDIO}")
+        print()
+        print("The Base model requires a reference audio for all synthesis.")
+        print("To prepare one, run:")
+        print("  ffmpeg -y -i input.mp3 -ss 3 -t 10 -ac 1 -ar 24000 sample_audio/reference.wav")
+        sys.exit(1)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = OUTPUT_BASE / f"basic_tts_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
+    print(f"Reference audio : {REFERENCE_AUDIO}")
     print()
 
     print(f"Loading model: {MODEL_ID}")
-    model = QwenTTS(MODEL_ID)
+    model = Qwen3TTSModel.from_pretrained(
+        MODEL_ID,
+        device_map="cuda:0" if torch.cuda.is_available() else "cpu",
+        dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        max_memory={0: "60GiB"},
+    )
     print("Model loaded.\n")
+
+    # Use empty string as ref_text to trigger x-vector only mode (speaker embedding only).
+    # This avoids requiring a transcript of the reference audio for basic TTS tests.
+    ref_text = ""
 
     results = []
     for tc in TEST_CASES:
@@ -121,7 +160,7 @@ def run_tests() -> None:
         print(f"  Input: {tc['text'][:80]}{'...' if len(tc['text']) > 80 else ''}")
 
         output_path = output_dir / f"{tc['id'].lower().replace('-', '_')}.wav"
-        result = synthesize(model, tc["text"], output_path)
+        result = synthesize(model, tc["text"], output_path, str(REFERENCE_AUDIO), ref_text)
 
         passed = result["max_amplitude"] > 0.01
         status = "PASS" if passed else "FAIL"

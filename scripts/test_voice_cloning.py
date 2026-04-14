@@ -9,12 +9,27 @@ Prerequisites:
     Audio must be clean, mono, at 24kHz sample rate.
 
     To convert any audio:
-        ffmpeg -y -i input.mp3 -ss 3 -t 10 -ac 1 -ar 24000 sample_audio/reference.wav
+        ffmpeg -y -i input.mp3 -ac 1 -ar 24000 sample_audio/reference.wav
 
 Usage:
+    # (A) 参照音声 + テキスト手動入力（Whisper 不要・ICL モード）
+    docker compose run qwen-tts python3 scripts/test_voice_cloning.py \\
+        --ref-audio sample_audio/reference.wav \\
+        --ref-text "参照音声に話されている内容をここに入力します。"
+
+    # (B) 参照音声のみ（Whisper で自動文字起こし・ICL モード）
+    docker compose run qwen-tts python3 scripts/test_voice_cloning.py \\
+        --ref-audio sample_audio/reference.wav
+
+    # (C) 事前作成した話者プロファイルを再利用（最速）
+    docker compose run qwen-tts python3 scripts/test_voice_cloning.py \\
+        --profile speaker_profiles/default.pt
+
+    # (D) 引数なし: sample_audio/ を自動検出して Whisper 文字起こし
     docker compose run qwen-tts python3 scripts/test_voice_cloning.py
 """
 
+import argparse
 import pathlib
 import subprocess
 import sys
@@ -36,18 +51,12 @@ except ImportError:
     sys.exit(1)
 
 try:
-    import whisper
-except ImportError:
-    print("ERROR: openai-whisper not found. Run: pip install openai-whisper")
-    sys.exit(1)
-
-try:
-    from qwen_tts import Qwen3TTSModel
+    from qwen_tts import Qwen3TTSModel, VoiceClonePromptItem
 except ImportError:
     print("ERROR: qwen_tts not found. Run: pip install qwen-tts")
     sys.exit(1)
 
-from model_utils import ensure_model_downloaded
+from model_utils import ensure_model_downloaded, load_speaker_profile
 
 MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 SAMPLE_AUDIO_DIR = pathlib.Path("/workspace/sample_audio")
@@ -114,12 +123,22 @@ def prepare_audio(source_path: pathlib.Path, output_path: pathlib.Path) -> bool:
 def transcribe_audio(audio_path: pathlib.Path) -> str:
     """Whisper で参照音声を文字起こしする。
 
+    --ref-text が指定されている場合はこの関数を呼ばない。
+    Whisper は ARM64 では CPU 実行になるため低速（数十秒）。
+
     Args:
         audio_path: 文字起こし対象の WAV ファイルパス。
 
     Returns:
         文字起こしテキスト。
     """
+    try:
+        import whisper
+    except ImportError:
+        print("ERROR: openai-whisper not found. Run: pip install openai-whisper")
+        print("Alternatively, pass --ref-text to skip transcription.")
+        sys.exit(1)
+
     print("  Transcribing reference audio with Whisper (base model, CPU)...")
     # ARM64: triton not available, Whisper uses CPU
     whisper_model = whisper.load_model("base", device="cpu")
@@ -131,29 +150,43 @@ def transcribe_audio(audio_path: pathlib.Path) -> str:
 
 def clone_and_synthesize(
     tts_model: Any,
-    reference_audio: pathlib.Path,
-    reference_text: str,
     target_text: str,
     output_path: pathlib.Path,
+    *,
+    reference_audio: pathlib.Path | None = None,
+    reference_text: str | None = None,
+    speaker_profile: VoiceClonePromptItem | None = None,
 ) -> dict[str, Any]:
     """参照音声の声質でターゲットテキストを音声合成する。
 
+    speaker_profile が指定された場合はプロファイルを再利用し、
+    参照音声の再処理（エンコード・埋め込み抽出）をスキップする。
+
     Args:
         tts_model: Qwen3TTSModel インスタンス。
-        reference_audio: 参照音声 WAV ファイルパス（24kHz mono）。
-        reference_text: 参照音声の文字起こしテキスト。
         target_text: 合成対象のテキスト。
         output_path: 出力先 WAV ファイルパス。
+        reference_audio: 参照音声 WAV ファイルパス（24kHz mono）。speaker_profile 未指定時に使用。
+        reference_text: 参照音声の文字起こしテキスト。speaker_profile 未指定時に使用。
+        speaker_profile: 事前生成した話者プロファイル。指定時は reference_audio/text を無視する。
 
     Returns:
         出力パス・再生時間・推論時間・最大振幅・サンプルレートを含む辞書。
     """
     start = time.time()
-    wavs, sample_rate = tts_model.generate_voice_clone(
-        target_text,
-        ref_audio=str(reference_audio),
-        ref_text=reference_text,
-    )
+    if speaker_profile is not None:
+        # プロファイル再利用: 参照音声の再エンコードなし
+        # generate_voice_clone は List[VoiceClonePromptItem] を期待する
+        wavs, sample_rate = tts_model.generate_voice_clone(
+            target_text,
+            voice_clone_prompt=[speaker_profile],
+        )
+    else:
+        wavs, sample_rate = tts_model.generate_voice_clone(
+            target_text,
+            ref_audio=str(reference_audio),
+            ref_text=reference_text,
+        )
     elapsed = time.time() - start
 
     audio = wavs[0]
@@ -171,82 +204,179 @@ def clone_and_synthesize(
     }
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="TC-06: Voice cloning test",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Modes (mutually exclusive):\n"
+            "  --profile             : reuse pre-built speaker profile (fastest)\n"
+            "  --ref-audio + --ref-text: ICL mode, no Whisper needed\n"
+            "  --ref-audio           : ICL mode, Whisper auto-transcription\n"
+            "  (none)                : auto-discover sample_audio/ + Whisper\n"
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        type=pathlib.Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Pre-built speaker profile (.pt). "
+            "Skips reference audio processing entirely. "
+            "Create with: python3 scripts/create_speaker_profile.py"
+        ),
+    )
+    parser.add_argument(
+        "--ref-audio",
+        type=pathlib.Path,
+        default=None,
+        metavar="PATH",
+        help="Reference audio file (any format; converted to 24kHz mono internally).",
+    )
+    parser.add_argument(
+        "--ref-text",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help=(
+            "Transcript of the reference audio. " "Enables ICL mode without running Whisper. " "Requires --ref-audio."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.profile and args.ref_audio:
+        parser.error("--profile and --ref-audio are mutually exclusive.")
+    if args.ref_text and not args.ref_audio:
+        parser.error("--ref-text requires --ref-audio.")
+
+    return args
+
+
 def run_tests() -> None:
+    args = parse_args()
     check_environment()
 
-    if not check_ffmpeg():
-        sys.exit(1)
-
-    # Discover reference audio files
-    audio_extensions = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
-    sample_files = [
-        f for f in SAMPLE_AUDIO_DIR.iterdir() if f.suffix.lower() in audio_extensions and f.name != ".gitkeep"
-    ]
-
-    if not sample_files:
-        print("ERROR: No reference audio files found in /workspace/sample_audio/")
-        print()
-        print("To prepare a reference audio file, run:")
-        print("  ffmpeg -y -i input.mp3 -ss 3 -t 10 -ac 1 -ar 24000 sample_audio/reference.wav")
-        print()
-        print("Then re-run this test.")
-        sys.exit(1)
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = OUTPUT_BASE / f"voice_cloning_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
-    print(f"Found {len(sample_files)} reference audio file(s).\n")
 
     print(f"Loading model: {MODEL_ID}")
     model_path = ensure_model_downloaded(MODEL_ID)
     tts_model = Qwen3TTSModel.from_pretrained(
         model_path,
-        device_map="cuda:0" if torch.cuda.is_available() else "cpu",
+        device_map=device,
         dtype=torch.float16,
         low_cpu_mem_usage=True,
         max_memory={0: "60GiB"},
     )
     print("Model loaded.\n")
 
-    results: list[dict[str, Any]] = []
-    for ref_file in sample_files:
-        print(f"[TC-06] Voice cloning — reference: {ref_file.name}")
+    # --- 話者プロファイル / 参照音声の準備 ---
+    if args.profile is not None:
+        # (C) 事前生成プロファイルを再利用（参照音声の再処理なし・最速）
+        print(f"Mode: profile reuse ({args.profile})")
+        speaker_profile = load_speaker_profile(args.profile, device=device)
+        ref_label = args.profile.stem
+        ref_audio_for_result = None
+        ref_text_for_result = None
 
-        # Convert reference audio to 24kHz mono WAV
+    elif args.ref_audio is not None:
+        if not check_ffmpeg():
+            sys.exit(1)
+        if not args.ref_audio.exists():
+            print(f"ERROR: Reference audio not found: {args.ref_audio}")
+            sys.exit(1)
+
+        prepared_path = output_dir / f"prepared_{args.ref_audio.stem}.wav"
+        print(f"  Preparing audio (24kHz mono WAV): {args.ref_audio.name}")
+        if not prepare_audio(args.ref_audio, prepared_path):
+            print(f"  FAIL: Could not prepare {args.ref_audio.name}")
+            sys.exit(1)
+
+        if args.ref_text is not None:
+            # (A) テキスト手動入力（Whisper 不要・ICL モード）
+            print(f"Mode: manual ref-text + ref-audio ({args.ref_audio.name})")
+            reference_text = args.ref_text
+            print(f"  Ref text: {reference_text}")
+        else:
+            # (B) 参照音声のみ（Whisper 自動文字起こし・ICL モード）
+            print(f"Mode: whisper transcription ({args.ref_audio.name})")
+            try:
+                reference_text = transcribe_audio(prepared_path)
+            except RuntimeError as e:
+                print(f"  FAIL: Transcription error: {e}")
+                sys.exit(1)
+
+        speaker_profile = None
+        ref_label = args.ref_audio.stem
+        ref_audio_for_result = prepared_path
+        ref_text_for_result = reference_text
+
+    else:
+        # (D) 引数なし: sample_audio/ を自動検出 + Whisper 文字起こし
+        if not check_ffmpeg():
+            sys.exit(1)
+
+        audio_extensions = {".wav", ".mp3", ".flac", ".m4a", ".ogg"}
+        sample_files = [
+            f for f in SAMPLE_AUDIO_DIR.iterdir() if f.suffix.lower() in audio_extensions and f.name != ".gitkeep"
+        ]
+        if not sample_files:
+            print("ERROR: No reference audio files found in /workspace/sample_audio/")
+            print("Prepare with: ffmpeg -y -i input.mp3 -ac 1 -ar 24000 sample_audio/reference.wav")
+            sys.exit(1)
+
+        ref_file = sample_files[0]
+        print(f"Mode: auto-discover + whisper ({ref_file.name})")
         prepared_path = output_dir / f"prepared_{ref_file.stem}.wav"
         print("  Preparing audio (24kHz mono WAV)...")
         if not prepare_audio(ref_file, prepared_path):
             print(f"  FAIL: Could not prepare {ref_file.name}")
-            results.append({"ref": ref_file.name, "passed": False})
-            continue
+            sys.exit(1)
 
-        # Transcribe reference audio for ICL mode
         try:
             reference_text = transcribe_audio(prepared_path)
         except RuntimeError as e:
             print(f"  FAIL: Transcription error: {e}")
-            results.append({"ref": ref_file.name, "passed": False})
-            continue
+            sys.exit(1)
 
-        # Synthesize each target text in the cloned voice
-        for i, target_text in enumerate(TARGET_TEXTS):
-            print(f"  Target [{i + 1}]: {target_text}")
-            output_path = output_dir / f"cloned_{ref_file.stem}_{i + 1}.wav"
+        speaker_profile = None
+        ref_label = ref_file.stem
+        ref_audio_for_result = prepared_path
+        ref_text_for_result = reference_text
 
-            try:
-                result = clone_and_synthesize(tts_model, prepared_path, reference_text, target_text, output_path)
-                passed = result["max_amplitude"] > 0.01
-                status = "PASS" if passed else "FAIL"
-                print(f"  Output  : {result['output_path'].name}")
-                print(f"  Duration: {result['duration_sec']:.2f}s")
-                print(f"  Latency : {result['inference_sec']:.2f}s")
-                print(f"  Max amp : {result['max_amplitude']:.4f}")
-                print(f"  Status  : {status}")
-                results.append({"ref": ref_file.name, "target": i + 1, "passed": passed, **result})
-            except RuntimeError as e:
-                print(f"  FAIL: Synthesis error: {e}")
-                results.append({"ref": ref_file.name, "target": i + 1, "passed": False})
+    print()
+
+    # --- 各ターゲットテキストを合成 ---
+    results: list[dict[str, Any]] = []
+    for i, target_text in enumerate(TARGET_TEXTS):
+        print(f"[TC-06] Voice cloning — target [{i + 1}]: {target_text}")
+        output_path = output_dir / f"cloned_{ref_label}_{i + 1}.wav"
+
+        try:
+            result = clone_and_synthesize(
+                tts_model,
+                target_text,
+                output_path,
+                reference_audio=ref_audio_for_result,
+                reference_text=ref_text_for_result,
+                speaker_profile=speaker_profile,
+            )
+            passed = result["max_amplitude"] > 0.01
+            status = "PASS" if passed else "FAIL"
+            print(f"  Output  : {result['output_path'].name}")
+            print(f"  Duration: {result['duration_sec']:.2f}s")
+            print(f"  Latency : {result['inference_sec']:.2f}s")
+            print(f"  Max amp : {result['max_amplitude']:.4f}")
+            print(f"  Status  : {status}")
+            results.append({"target": i + 1, "passed": passed, **result})
+        except RuntimeError as e:
+            print(f"  FAIL: Synthesis error: {e}")
+            results.append({"target": i + 1, "passed": False})
 
         print()
 

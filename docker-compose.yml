@@ -22,6 +22,8 @@ services:
       - ./sample_audio:/workspace/sample_audio:ro
       # Output: bind mount so generated audio is immediately accessible on host
       - ./output:/workspace/output
+      # Speaker profiles: bind mount so .pt files persist across containers
+      - ./speaker_profiles:/workspace/speaker_profiles
       # Named volumes: persist model weights across container rebuilds
       - hf_cache:/workspace/.cache/huggingface
       - torch_cache:/workspace/.cache/torch

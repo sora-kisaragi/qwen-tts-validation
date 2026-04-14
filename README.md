@@ -65,7 +65,9 @@ qwen-tts-validation/
 │   ├── test_basic_tts.py           # TC-01, TC-02: 英語 TTS
 │   ├── test_japanese.py            # TC-03〜TC-05: 日本語 TTS
 │   ├── test_voice_cloning.py       # TC-06: ボイスクローニング
-│   └── create_speaker_profile.py  # 話者プロファイル (.pt) 生成ユーティリティ
+│   ├── create_speaker_profile.py  # 話者プロファイル (.pt) 生成ユーティリティ
+│   ├── test_voice_design.py        # VoiceDesign モデル検証 (instruct / language)
+│   └── test_language_param.py     # language パラメータ効果検証 (Auto vs ja)
 ├── sample_audio/                   # 参照音声 WAV を置く場所 (.gitignore 対象)
 ├── speaker_profiles/               # 話者プロファイル .pt (.gitignore 対象)
 ├── output/                         # 生成音声の出力先 (.gitignore 対象)

@@ -105,15 +105,15 @@ LANGUAGE_TEST_CASES = [
         "id": "TC-VD-06",
         "text": "音声合成の技術は急速に発展しています。自然な日本語の発音と抑揚が再現できるか確認します。",
         "instruct": "Speak in a natural Japanese voice.",
-        "language": "ja",
-        "description": "日本語漢字 language=ja",
+        "language": "japanese",
+        "description": "日本語漢字 language=japanese",
     },
     {
         "id": "TC-VD-07",
         "text": "今日はQwen TTSのテストをしています。This is a mixed language test combining Japanese and English.",
         "instruct": "Speak naturally, switching between Japanese and English as appropriate.",
-        "language": "ja",
-        "description": "日英混在 language=ja",
+        "language": "japanese",
+        "description": "日英混在 language=japanese",
     },
 ]
 

@@ -88,7 +88,7 @@ TEST_TEXTS = [
     },
 ]
 
-LANGUAGES_TO_TEST = [None, "ja"]  # None → "Auto" (デフォルト)
+LANGUAGES_TO_TEST = [None, "japanese"]  # None → "Auto" (デフォルト)
 
 
 def parse_args() -> argparse.Namespace:

@@ -32,6 +32,62 @@ services:
     tty: true
     command: bash
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen-tts-validation:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/workspace/.cache/huggingface
+      - TORCH_HOME=/workspace/.cache/torch
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/workspace/api:ro
+      - ./scripts:/workspace/scripts:ro
+      - ./sample_audio:/workspace/sample_audio:ro
+      - ./output:/workspace/output
+      - ./speaker_profiles:/workspace/speaker_profiles
+      - hf_cache:/workspace/.cache/huggingface
+      - torch_cache:/workspace/.cache/torch
+    working_dir: /workspace
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+
+  webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen-tts-validation:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/workspace/.cache/huggingface
+      - TORCH_HOME=/workspace/.cache/torch
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
+      # API サーバーのベース URL（WebUI からの呼び出し先）
+      - TTS_API_URL=http://api:8000
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./webui:/workspace/webui:ro
+      - ./scripts:/workspace/scripts:ro
+      - ./sample_audio:/workspace/sample_audio:ro
+      - ./output:/workspace/output
+      - ./speaker_profiles:/workspace/speaker_profiles
+      - hf_cache:/workspace/.cache/huggingface
+      - torch_cache:/workspace/.cache/torch
+    working_dir: /workspace
+    depends_on:
+      - api
+    command: python3 webui/app.py
+
 volumes:
   hf_cache:
     driver: local

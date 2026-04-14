@@ -104,7 +104,9 @@ def synthesize(
     wavs, sample_rate = model.generate_voice_clone(
         text,
         ref_audio=ref_audio,
-        ref_text=ref_text,
+        ref_text=ref_text if ref_text else None,
+        # ref_text なしの場合は speaker embedding のみで合成（x_vector_only_mode）
+        x_vector_only_mode=not bool(ref_text),
     )
     elapsed = time.time() - start
 

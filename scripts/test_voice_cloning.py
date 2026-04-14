@@ -42,11 +42,12 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from qwen_tts import QwenTTS
+    from qwen_tts import Qwen3TTSModel
 except ImportError:
     print("ERROR: qwen_tts not found. Run: pip install qwen-tts")
     sys.exit(1)
 
+from model_utils import ensure_model_downloaded
 
 MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 SAMPLE_AUDIO_DIR = pathlib.Path("/workspace/sample_audio")
@@ -69,7 +70,7 @@ def check_environment() -> None:
         cap = torch.cuda.get_device_capability(0)
         print(f"SM capability   : sm_{cap[0]}{cap[1]}")
     # Whisper runs on CPU on ARM64 (triton not available)
-    print(f"Whisper device  : {'cuda' if torch.cuda.is_available() else 'cpu'} (transcription)")
+    print("Whisper device  : cpu (ARM64: triton unavailable)")
     print()
 
 
@@ -119,10 +120,10 @@ def transcribe_audio(audio_path: pathlib.Path) -> str:
     Returns:
         文字起こしテキスト。
     """
-    print("  Transcribing reference audio with Whisper (base model)...")
+    print("  Transcribing reference audio with Whisper (base model, CPU)...")
     # ARM64: triton not available, Whisper uses CPU
-    model = whisper.load_model("base")
-    result = model.transcribe(str(audio_path))
+    whisper_model = whisper.load_model("base", device="cpu")
+    result = whisper_model.transcribe(str(audio_path))
     text = str(result["text"]).strip()
     print(f"  Transcript: {text}")
     return text
@@ -138,7 +139,7 @@ def clone_and_synthesize(
     """参照音声の声質でターゲットテキストを音声合成する。
 
     Args:
-        tts_model: QwenTTS モデルインスタンス。
+        tts_model: Qwen3TTSModel インスタンス。
         reference_audio: 参照音声 WAV ファイルパス（24kHz mono）。
         reference_text: 参照音声の文字起こしテキスト。
         target_text: 合成対象のテキスト。
@@ -148,14 +149,14 @@ def clone_and_synthesize(
         出力パス・再生時間・推論時間・最大振幅・サンプルレートを含む辞書。
     """
     start = time.time()
-    # QwenTTS voice cloning API: pass reference audio path and transcript
-    audio, sample_rate = tts_model(
+    wavs, sample_rate = tts_model.generate_voice_clone(
         target_text,
-        reference_audio=str(reference_audio),
-        reference_text=reference_text,
+        ref_audio=str(reference_audio),
+        ref_text=reference_text,
     )
     elapsed = time.time() - start
 
+    audio = wavs[0]
     sf.write(str(output_path), audio, sample_rate)
 
     max_amplitude = float(np.abs(audio).max())
@@ -198,7 +199,14 @@ def run_tests() -> None:
     print(f"Found {len(sample_files)} reference audio file(s).\n")
 
     print(f"Loading model: {MODEL_ID}")
-    tts_model = QwenTTS(MODEL_ID)
+    model_path = ensure_model_downloaded(MODEL_ID)
+    tts_model = Qwen3TTSModel.from_pretrained(
+        model_path,
+        device_map="cuda:0" if torch.cuda.is_available() else "cpu",
+        dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        max_memory={0: "60GiB"},
+    )
     print("Model loaded.\n")
 
     results: list[dict[str, Any]] = []
@@ -213,7 +221,7 @@ def run_tests() -> None:
             results.append({"ref": ref_file.name, "passed": False})
             continue
 
-        # Transcribe
+        # Transcribe reference audio for ICL mode
         try:
             reference_text = transcribe_audio(prepared_path)
         except RuntimeError as e:
@@ -221,7 +229,7 @@ def run_tests() -> None:
             results.append({"ref": ref_file.name, "passed": False})
             continue
 
-        # Synthesize each target text
+        # Synthesize each target text in the cloned voice
         for i, target_text in enumerate(TARGET_TEXTS):
             print(f"  Target [{i + 1}]: {target_text}")
             output_path = output_dir / f"cloned_{ref_file.stem}_{i + 1}.wav"

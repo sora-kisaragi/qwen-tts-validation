@@ -34,12 +34,12 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from huggingface_hub import snapshot_download
     from qwen_tts import Qwen3TTSModel
 except ImportError:
     print("ERROR: qwen_tts not found. Run: pip install qwen-tts")
     sys.exit(1)
 
+from model_utils import ensure_model_downloaded
 
 MODEL_ID = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 OUTPUT_BASE = pathlib.Path("/workspace/output")
@@ -142,9 +142,7 @@ def run_tests() -> None:
     print()
 
     print(f"Loading model: {MODEL_ID}")
-    # snapshot_download ensures speech_tokenizer/ subdir is fully downloaded.
-    # AutoModel.from_pretrained alone only fetches top-level files.
-    model_path = snapshot_download(MODEL_ID)
+    model_path = ensure_model_downloaded(MODEL_ID)
     model = Qwen3TTSModel.from_pretrained(
         model_path,
         device_map="cuda:0" if torch.cuda.is_available() else "cpu",

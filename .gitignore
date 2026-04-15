@@ -41,3 +41,11 @@ Thumbs.db
 
 # Docker build artifacts
 *.tar
+
+# Fine-tuning data and checkpoints (personal audio / large files)
+finetune_data/*.wav
+finetune_data/*.mp3
+finetune_data/*.jsonl
+finetune_output/*/
+# 公式スクリプトはホストに配置してコンテナへマウントする（gitignore 対象外）
+# finetuning/ ディレクトリ内の .py は追跡する

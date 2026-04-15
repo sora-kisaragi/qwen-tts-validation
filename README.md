@@ -57,22 +57,35 @@ NVIDIA DGX Spark (GB10 GPU, CUDA 13.0, ARM64) 上で [Qwen3-TTS](https://hugging
 
 ```
 qwen-tts-validation/
-├── Dockerfile                      # ubuntu:24.04 + torch 2.9.1+cu130
-├── docker-compose.yml              # GPU パススルー + volume 定義
-├── requirements.txt                # qwen-tts 0.1.1 他
+├── Dockerfile                       # ubuntu:24.04 + torch 2.9.1+cu130
+├── docker-compose.yml               # GPU パススルー + volume 定義（3サービス: qwen-tts / api / webui）
+├── requirements.txt                 # qwen-tts 0.1.1 + fastapi + uvicorn + gradio 他
+├── api/                             # FastAPI サーバー（port 7865）
+│   ├── main.py                      # アプリ定義・lifespan・メタ情報エンドポイント
+│   ├── models.py                    # 3モデル一括ロード・シングルトン管理
+│   ├── schemas.py                   # Pydantic リクエストスキーマ
+│   └── routes/
+│       ├── voice_clone.py           # POST /tts/voice-clone, /tts/voice-clone/profile
+│       ├── custom_voice.py          # POST /tts/custom-voice
+│       └── voice_design.py          # POST /tts/voice-design
+├── webui/
+│   └── app.py                       # Gradio WebUI（port 7860）3タブ構成
 ├── scripts/
-│   ├── model_utils.py              # モデルローダー・話者プロファイル保存/ロード
-│   ├── test_basic_tts.py           # TC-01, TC-02: 英語 TTS
-│   ├── test_japanese.py            # TC-03〜TC-05: 日本語 TTS
-│   ├── test_voice_cloning.py       # TC-06: ボイスクローニング
-│   ├── create_speaker_profile.py  # 話者プロファイル (.pt) 生成ユーティリティ
-│   ├── test_voice_design.py        # VoiceDesign モデル検証 (instruct / language)
-│   └── test_language_param.py     # language パラメータ効果検証 (Auto vs ja)
-├── sample_audio/                   # 参照音声 WAV を置く場所 (.gitignore 対象)
-├── speaker_profiles/               # 話者プロファイル .pt (.gitignore 対象)
-├── output/                         # 生成音声の出力先 (.gitignore 対象)
+│   ├── model_utils.py               # モデルローダー・話者プロファイル保存/ロード
+│   ├── test_basic_tts.py            # TC-01, TC-02: 英語 TTS
+│   ├── test_japanese.py             # TC-03〜TC-05: 日本語 TTS
+│   ├── test_voice_cloning.py        # TC-06: ボイスクローニング
+│   ├── create_speaker_profile.py    # 話者プロファイル (.pt) 生成ユーティリティ
+│   ├── test_voice_design.py         # VoiceDesign モデル検証 (instruct / language)
+│   └── test_language_param.py       # language パラメータ効果検証 (auto vs japanese)
+├── sample_audio/                    # 参照音声 WAV を置く場所 (.gitignore 対象)
+├── speaker_profiles/                # 話者プロファイル .pt (.gitignore 対象)
+├── output/                          # 生成音声の出力先 (.gitignore 対象)
 └── docs/
-    └── validation-plan.md          # テスト計画・検証結果
+    ├── api-spec.md                  # API エンドポイント仕様書（他プロジェクト参照用）
+    ├── v2-design.md                 # API 設計・組み合わせマトリクス
+    ├── official-research.md         # 公式 GitHub 調査結果
+    └── validation-plan.md           # テスト計画・検証結果
 ```
 
 ---
@@ -91,7 +104,49 @@ qwen-tts-validation/
 docker compose build
 ```
 
-### テスト実行
+---
+
+## API サーバー / WebUI の起動
+
+### サービス構成
+
+| サービス | URL | 説明 |
+|---------|-----|------|
+| `api` | http://localhost:7865 | FastAPI REST API サーバー |
+| `api` | http://localhost:7865/docs | Swagger UI（ブラウザで試せる） |
+| `webui` | http://localhost:7860 | Gradio WebUI（3タブ構成） |
+
+### 起動
+
+```bash
+docker compose up api webui
+```
+
+初回起動時に Base / VoiceDesign / CustomVoice の 3 モデルがロードされます（約1〜2分）。
+`All models ready.` がログに出たら利用可能です。
+
+### API の使用例
+
+```bash
+# 組み込み話者で合成（ono_anna / 日本語）
+curl -X POST http://localhost:7865/tts/custom-voice \
+  -H "Content-Type: application/json" \
+  -d '{"text": "こんにちは。", "speaker": "ono_anna", "language": "japanese"}' \
+  --output output/result.wav
+
+# 参照音声からボイスクローン
+curl -X POST http://localhost:7865/tts/voice-clone \
+  -F "text=Hello, this is a test." \
+  -F "ref_audio=@sample_audio/reference.wav" \
+  -F "ref_text=参照音声の書き起こし" \
+  --output output/result.wav
+```
+
+全エンドポイントの詳細は [docs/api-spec.md](docs/api-spec.md) を参照。
+
+---
+
+## スクリプトでのテスト実行
 
 ```bash
 # 基本 TTS テスト (英語)

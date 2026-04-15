@@ -20,6 +20,9 @@ Qwen3-TTS FastAPI サーバーのエンドポイント仕様。
 | GET | `/tts/languages` | 対応言語一覧 | — |
 | POST | `/tts/voice-clone` | 参照音声から音声合成 | Base |
 | POST | `/tts/voice-clone/profile` | 保存済みプロファイルから音声合成 | Base |
+| GET | `/tts/voice-clone/profiles` | 保存済みプロファイル一覧 | — |
+| POST | `/tts/voice-clone/profiles` | 話者プロファイル作成 | Base |
+| DELETE | `/tts/voice-clone/profiles/{profile_name}` | 話者プロファイル削除 | — |
 | POST | `/tts/custom-voice` | 組み込み話者で音声合成 | CustomVoice |
 | POST | `/tts/voice-design` | instruct で声を設計して音声合成 | VoiceDesign |
 
@@ -132,12 +135,86 @@ curl -X POST http://localhost:7865/tts/voice-clone/profile \
   --output output/result.wav
 ```
 
-**プロファイルの事前生成**（コンテナ内で実行）
+> **ヒント**: WebUI の「プロファイル管理」タブを使うと CLI なしでプロファイルを作成・管理できます。
+
+---
+
+### GET `/tts/voice-clone/profiles` — プロファイル一覧
+
+`speaker_profiles/` 内の `.pt` ファイルを一覧する。
+
+**レスポンス**
+
+```json
+{
+  "profiles": [
+    {"name": "default.pt", "created_at": "2026-04-15T10:00:00Z"},
+    {"name": "my_voice.pt", "created_at": "2026-04-15T12:30:00Z"}
+  ]
+}
+```
+
+---
+
+### POST `/tts/voice-clone/profiles` — 話者プロファイル作成
+
+参照音声から話者プロファイル (`.pt`) を生成し `speaker_profiles/` に保存する。
+
+- `ref_text` を省略すると **x-vector モード**（高速・簡易）
+- `ref_text` を指定すると **ICL モード**（より高い声質再現度）
+- `profile_name` に `.pt` 拡張子は不要（自動付与）
+
+**リクエスト**: `multipart/form-data`
+
+| フィールド | 型 | 必須 | 説明 |
+|-----------|-----|------|------|
+| `ref_audio` | file (WAV) | ✅ | 参照音声ファイル。24kHz mono, 3〜10秒推奨 |
+| `profile_name` | string | ✅ | 保存名。英数字・アンダースコア・ハイフンのみ（`.pt` は自動付与） |
+| `ref_text` | string | — | 参照音声の書き起こし。省略時は x-vector モード |
+
+**レスポンス** (201 Created)
+
+```json
+{"profile_name": "my_voice.pt", "message": "created"}
+```
+
+**curl 例**
 
 ```bash
-docker compose run qwen-tts python3 scripts/create_speaker_profile.py \
-  --ref-audio sample_audio/reference.wav \
-  --output speaker_profiles/default.pt
+# ICL モード（推奨）
+curl -X POST http://localhost:7865/tts/voice-clone/profiles \
+  -F "ref_audio=@sample_audio/reference.wav" \
+  -F "profile_name=my_voice" \
+  -F "ref_text=参照音声で話されている内容"
+
+# x-vector モード（ref_text なし）
+curl -X POST http://localhost:7865/tts/voice-clone/profiles \
+  -F "ref_audio=@sample_audio/reference.wav" \
+  -F "profile_name=my_voice"
+```
+
+---
+
+### DELETE `/tts/voice-clone/profiles/{profile_name}` — 話者プロファイル削除
+
+指定した `.pt` ファイルを `speaker_profiles/` から削除する。
+
+**パスパラメータ**
+
+| パラメータ | 説明 |
+|-----------|------|
+| `profile_name` | 削除するファイル名。例: `my_voice.pt` |
+
+**レスポンス** (200 OK)
+
+```json
+{"profile_name": "my_voice.pt", "message": "deleted"}
+```
+
+**curl 例**
+
+```bash
+curl -X DELETE http://localhost:7865/tts/voice-clone/profiles/my_voice.pt
 ```
 
 ---
@@ -226,8 +303,9 @@ curl -X POST http://localhost:7865/tts/voice-design \
 
 | HTTP ステータス | 原因 |
 |----------------|------|
-| `422 Unprocessable Entity` | 不正なパラメータ（存在しない `speaker` / `language` など） |
+| `400 Bad Request` | 不正なプロファイル名（禁止文字を含む） |
 | `404 Not Found` | 指定したプロファイルファイルが存在しない |
+| `422 Unprocessable Entity` | 不正なパラメータ（存在しない `speaker` / `language` など） |
 | `500 Internal Server Error` | モデル推論中の予期しないエラー |
 
 エラーレスポンスの形式:

@@ -3,32 +3,35 @@ Voice Clone ルート — 組み合わせ #1, #2
 
 - 目的: 参照音声ファイルまたは保存済みプロファイル (.pt) を使って
         Base モデルで音声合成する。
-- 対象: POST /tts/voice-clone, POST /tts/voice-clone/profile
-- 関連: Issue #32, docs/v2-design.md 組み合わせ #1/#2
+- 対象: POST /tts/voice-clone, POST /tts/voice-clone/profile,
+        GET/POST/DELETE /tts/voice-clone/profiles
+- 関連: Issue #32, Issue #47, docs/v2-design.md 組み合わせ #1/#2
 
 作成者: 宗廣 颯真
 作成日: 2026-04-14
 最終更新者: 宗廣 颯真
-最終更新日: 2026-04-14
+最終更新日: 2026-04-15
 """
 
 import io
 import logging
 import pathlib
+import re
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 import numpy as np
 import soundfile as sf
 from fastapi import APIRouter, Form, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 _SCRIPTS_DIR = pathlib.Path(__file__).parent.parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from audio_utils import ensure_wav_format  # noqa: E402
-from model_utils import load_speaker_profile  # noqa: E402
+from model_utils import load_speaker_profile, save_speaker_profile  # noqa: E402
 
 from api.models import get_model  # noqa: E402
 
@@ -151,3 +154,123 @@ async def voice_clone_profile(
         content=_wav_to_bytes(wavs[0], sample_rate),
         media_type="audio/wav",
     )
+
+
+# ─── プロファイル管理エンドポイント ───────────────────────────────────────────
+
+_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _validate_profile_name(name: str) -> None:
+    """プロファイル名のバリデーション（パス・インジェクション防止）。
+
+    Args:
+        name: チェックするプロファイル名（拡張子なし）。
+
+    Raises:
+        HTTPException: 不正な文字を含む場合（400）。
+    """
+    if not _PROFILE_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail="profile_name には英数字・アンダースコア・ハイフンのみ使用できます。",
+        )
+
+
+@router.get(
+    "/voice-clone/profiles",
+    summary="保存済みプロファイル一覧",
+    description="speaker_profiles/ ディレクトリ内の .pt ファイルを一覧する。",
+)
+async def list_profiles() -> JSONResponse:
+    """保存済み話者プロファイルの一覧を返す。
+
+    Returns:
+        profiles: name（ファイル名）と created_at（ISO 8601 UTC）のリスト。
+    """
+    _SPEAKER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    profiles = []
+    for pt_file in sorted(_SPEAKER_PROFILES_DIR.glob("*.pt")):
+        mtime = pt_file.stat().st_mtime
+        created_at = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        profiles.append({"name": pt_file.name, "created_at": created_at})
+    return JSONResponse({"profiles": profiles})
+
+
+@router.post(
+    "/voice-clone/profiles",
+    summary="話者プロファイル作成",
+    description=(
+        "参照音声から話者プロファイル (.pt) を生成して speaker_profiles/ に保存する。\n\n"
+        "- `ref_text` を省略すると x-vector モード（高速・簡易）で生成する。\n"
+        "- `ref_text` を指定すると ICL モード（より高い声質再現度）で生成する。\n"
+        "- `profile_name` に `.pt` 拡張子は不要（自動付与）。"
+    ),
+)
+async def create_profile(
+    ref_audio: UploadFile = Form(..., description="参照音声ファイル（24kHz mono WAV 推奨、3〜10秒）。"),
+    profile_name: str = Form(..., description="保存するプロファイル名。英数字・_・-のみ（.pt は自動付与）。"),
+    ref_text: str | None = Form(
+        default=None,
+        description="参照音声の書き起こし（任意）。指定すると ICL モードで声質精度が向上する。",
+    ),
+) -> JSONResponse:
+    _validate_profile_name(profile_name)
+    model = get_model("base")
+
+    # 参照音声を一時ファイルに保存してから変換する
+    suffix = pathlib.Path(ref_audio.filename or "ref.wav").suffix or ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await ref_audio.read())
+        tmp_path = pathlib.Path(tmp.name)
+
+    converted_dir = tmp_path.parent / "converted"
+    wav_path = ensure_wav_format(tmp_path, converted_dir=converted_dir)
+
+    try:
+        x_vector_only = ref_text is None
+        prompts = model.create_voice_clone_prompt(
+            ref_audio=str(wav_path),
+            ref_text=ref_text,
+            x_vector_only_mode=x_vector_only,
+        )
+    except Exception as exc:
+        logger.exception("create_profile failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    finally:
+        tmp_path.unlink(missing_ok=True)
+        if wav_path != tmp_path:
+            wav_path.unlink(missing_ok=True)
+
+    profile = prompts[0] if isinstance(prompts, list) else prompts
+    pt_filename = f"{profile_name}.pt"
+    save_speaker_profile(profile, _SPEAKER_PROFILES_DIR / pt_filename)
+
+    return JSONResponse({"profile_name": pt_filename, "message": "created"}, status_code=201)
+
+
+@router.delete(
+    "/voice-clone/profiles/{profile_name}",
+    summary="話者プロファイル削除",
+    description="指定した .pt プロファイルを speaker_profiles/ から削除する。",
+)
+async def delete_profile(profile_name: str) -> JSONResponse:
+    """指定プロファイルを削除する。
+
+    Args:
+        profile_name: 削除するプロファイルファイル名（例: default.pt）。
+
+    Raises:
+        HTTPException: プロファイルが存在しない場合（404）。
+    """
+    # パス・インジェクション防止: ファイル名にディレクトリ区切りを含まないことを確認する
+    if "/" in profile_name or "\\" in profile_name or ".." in profile_name:
+        raise HTTPException(status_code=400, detail="無効なプロファイル名です。")
+
+    profile_path = _SPEAKER_PROFILES_DIR / profile_name
+    if not profile_path.exists():
+        raise HTTPException(status_code=404, detail=f"Profile not found: {profile_name}")
+
+    profile_path.unlink()
+    logger.info("Deleted speaker profile: %s", profile_name)
+    return JSONResponse({"profile_name": profile_name, "message": "deleted"})

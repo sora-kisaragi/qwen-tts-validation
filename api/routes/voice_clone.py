@@ -27,6 +27,7 @@ _SCRIPTS_DIR = pathlib.Path(__file__).parent.parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+from audio_utils import ensure_wav_format  # noqa: E402
 from model_utils import load_speaker_profile  # noqa: E402
 
 from api.models import get_model  # noqa: E402
@@ -80,12 +81,17 @@ async def voice_clone(
         tmp.write(await ref_audio.read())
         tmp_path = tmp.name
 
+    # アップロードされた音声が推奨スペック（24kHz, mono, WAV）でない場合に変換する
+    tmp_path_obj = pathlib.Path(tmp_path)
+    converted_dir = tmp_path_obj.parent / "converted"
+    wav_path = ensure_wav_format(tmp_path_obj, converted_dir=converted_dir)
+
     try:
         x_vector_only = ref_text is None
         wavs, sample_rate = model.generate_voice_clone(
             text=text,
             language=language,
-            ref_audio=tmp_path,
+            ref_audio=str(wav_path),
             ref_text=ref_text,
             x_vector_only_mode=x_vector_only,
         )
@@ -93,7 +99,10 @@ async def voice_clone(
         logger.exception("voice_clone failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        pathlib.Path(tmp_path).unlink(missing_ok=True)
+        tmp_path_obj.unlink(missing_ok=True)
+        # 変換が行われた場合は変換後ファイルも削除する
+        if wav_path != tmp_path_obj:
+            wav_path.unlink(missing_ok=True)
 
     return Response(
         content=_wav_to_bytes(wavs[0], sample_rate),

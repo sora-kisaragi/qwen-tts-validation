@@ -3,8 +3,10 @@ Fine-tuning 用データセット (raw JSONL) 作成ユーティリティ
 
 - 目的: WAV ディレクトリ + 書き起こし CSV から、公式 prepare_data.py への
         入力 JSONL ファイルを生成する。
+        推奨スペック（24kHz, mono, WAV）でない音声は ffmpeg で自動変換する。
 - 対象: Issue #36 — 参照音声 + instruct 組み合わせのファインチューニング
 - 関連: https://github.com/QwenLM/Qwen3-TTS/tree/main/finetuning
+         scripts/audio_utils.py — 音声変換ユーティリティ
          docs/v2-design.md — 組み合わせマトリクス
 
 作成者: 宗廣 颯真
@@ -15,7 +17,7 @@ Fine-tuning 用データセット (raw JSONL) 作成ユーティリティ
 Usage:
     # 1. 書き起こし CSV を用意（ヘッダーなし: filename,text）
     #    例: 001.wav,おはようございます。今日もよろしくお願いします。
-    #        002.wav,テストの音声ファイルです。
+    #        002.mp3,テストの音声ファイルです。  ← MP3 も自動変換される
 
     # 2. raw JSONL を生成（このスクリプト）
     python3 scripts/create_finetune_dataset.py \\
@@ -46,59 +48,33 @@ import pathlib
 import sys
 
 import soundfile as sf
+from audio_utils import ensure_wav_format
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# WAV 検証: 推奨スペックから外れる場合に警告するしきい値
-_RECOMMENDED_SAMPLE_RATE = 24000
+# 長さの許容範囲
 _MIN_DURATION_SEC = 1.0
 _MAX_DURATION_SEC = 30.0
 _RECOMMENDED_MIN_DURATION_SEC = 3.0
 _RECOMMENDED_MAX_DURATION_SEC = 15.0
 
 
-def _validate_wav(path: pathlib.Path, label: str) -> tuple[int, float]:
-    """WAV ファイルのサンプルレート・長さを検証し、(sample_rate, duration) を返す。
+def _validate_duration(path: pathlib.Path, label: str) -> float:
+    """変換後の WAV ファイルの長さを検証して duration (秒) を返す。
 
     Args:
-        path: 検証する WAV ファイルのパス。
-        label: エラーメッセージに使うラベル（例: "001.wav"）。
+        path: 検証する WAV ファイルのパス（変換済みであること）。
+        label: エラーメッセージに使うラベル。
 
     Returns:
-        (sample_rate, duration_in_seconds) のタプル。
+        再生時間（秒）。
 
     Raises:
-        SystemExit: ファイルが存在しない、または長さが許容範囲外の場合。
+        SystemExit: 長さが許容範囲外の場合。
     """
-    if not path.exists():
-        logger.error("[%s] File not found: %s", label, path)
-        sys.exit(1)
-
-    try:
-        info = sf.info(str(path))
-    except Exception as exc:
-        logger.error("[%s] Cannot read WAV: %s — %s", label, path, exc)
-        sys.exit(1)
-
+    info = sf.info(str(path))
     duration = info.frames / info.samplerate
-
-    if info.samplerate != _RECOMMENDED_SAMPLE_RATE:
-        logger.warning(
-            "[%s] Sample rate is %d Hz (recommended: %d Hz). " "Convert with: ffmpeg -i %s -ar 24000 -ac 1 output.wav",
-            label,
-            info.samplerate,
-            _RECOMMENDED_SAMPLE_RATE,
-            path.name,
-        )
-
-    if info.channels > 1:
-        logger.warning(
-            "[%s] %d channels detected (recommended: mono). " "Convert with: ffmpeg -i %s -ac 1 output.wav",
-            label,
-            info.channels,
-            path.name,
-        )
 
     if duration < _MIN_DURATION_SEC:
         logger.error("[%s] Duration %.2fs is too short (minimum: %.1fs).", label, duration, _MIN_DURATION_SEC)
@@ -118,7 +94,7 @@ def _validate_wav(path: pathlib.Path, label: str) -> tuple[int, float]:
             "[%s] Duration %.2fs is longer than recommended (%.1fs).", label, duration, _RECOMMENDED_MAX_DURATION_SEC
         )
 
-    return info.samplerate, duration
+    return duration
 
 
 def _read_transcript(transcript_path: pathlib.Path) -> list[tuple[str, str]]:
@@ -127,7 +103,7 @@ def _read_transcript(transcript_path: pathlib.Path) -> list[tuple[str, str]]:
     CSV フォーマット（ヘッダーなし）:
         filename,text
         001.wav,おはようございます。
-        002.wav,テストの音声ファイルです。
+        002.mp3,テストの音声ファイルです。
 
     Args:
         transcript_path: CSV ファイルのパス。
@@ -180,8 +156,11 @@ def create_dataset(
 ) -> int:
     """raw JSONL データセットを生成する。
 
+    推奨スペック（24kHz, mono, WAV）でない音声ファイルは ffmpeg で自動変換する。
+    変換後ファイルは wav_dir/converted/ に保存される。
+
     Args:
-        wav_dir: WAV ファイルが格納されているディレクトリ。
+        wav_dir: 音声ファイルが格納されているディレクトリ（WAV 以外も可）。
         transcript_path: 書き起こし CSV のパス。
         ref_audio_path: 話者代表音声のパス（全サンプルで共通）。
         output_path: 出力 JSONL ファイルのパス。
@@ -193,9 +172,15 @@ def create_dataset(
     Raises:
         SystemExit: 入力ファイルに問題がある場合。
     """
-    # 参照音声を検証する
-    logger.info("Validating ref_audio: %s", ref_audio_path)
-    _validate_wav(ref_audio_path, "ref_audio")
+    converted_dir = wav_dir / "converted"
+
+    # 参照音声を変換・検証する
+    logger.info("Processing ref_audio: %s", ref_audio_path)
+    if not ref_audio_path.exists():
+        logger.error("ref_audio not found: %s", ref_audio_path)
+        sys.exit(1)
+    ref_wav_path = ensure_wav_format(ref_audio_path, converted_dir=converted_dir)
+    _validate_duration(ref_wav_path, "ref_audio")
 
     # 書き起こしを読み込む
     entries = _read_transcript(transcript_path)
@@ -205,30 +190,33 @@ def create_dataset(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     written = 0
-    skipped = 0
 
     with output_path.open("w", encoding="utf-8") as out_f:
         for filename, text in entries:
-            wav_path = wav_dir / filename
+            src_path = wav_dir / filename
+            if not src_path.exists():
+                logger.error("[%s] File not found: %s — skipped.", filename, src_path)
+                continue
 
-            # 各 WAV を検証する
-            _, duration = _validate_wav(wav_path, filename)
+            # 推奨スペックでなければ自動変換する
+            wav_path = ensure_wav_format(src_path, converted_dir=converted_dir)
+            duration = _validate_duration(wav_path, filename)
 
             record = {
                 "audio": str(wav_path.resolve()),
                 "text": text,
-                "ref_audio": str(ref_audio_path.resolve()),
+                "ref_audio": str(ref_wav_path.resolve()),
                 "language": language,
             }
             out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            logger.info("  [%s] %.2fs — %s", filename, duration, text[:40])
+            logger.info("  [%s] %.2fs — %s", wav_path.name, duration, text[:40])
             written += 1
 
     if written == 0:
         logger.error("No entries written. Check wav_dir and transcript.")
         sys.exit(1)
 
-    logger.info("Done. %d entries written to %s (%d skipped).", written, output_path, skipped)
+    logger.info("Done. %d entries written to %s.", written, output_path)
     return written
 
 
@@ -236,7 +224,8 @@ def main() -> None:
     """CLI エントリーポイント。"""
     parser = argparse.ArgumentParser(
         description=(
-            "WAV ディレクトリ + 書き起こし CSV から fine-tuning 用 raw JSONL を生成する。\n"
+            "音声ディレクトリ + 書き起こし CSV から fine-tuning 用 raw JSONL を生成する。\n"
+            "推奨スペック（24kHz, mono, WAV）でない音声は ffmpeg で自動変換する。\n"
             "生成後は公式 prepare_data.py で音声コードに変換すること。"
         )
     )
@@ -244,7 +233,7 @@ def main() -> None:
         "--wav-dir",
         required=True,
         type=pathlib.Path,
-        help="WAV ファイルが格納されているディレクトリ。",
+        help="音声ファイルが格納されているディレクトリ（WAV / MP3 / M4A 等可）。",
     )
     parser.add_argument(
         "--transcript",
@@ -256,7 +245,7 @@ def main() -> None:
         "--ref-audio",
         required=True,
         type=pathlib.Path,
-        help="話者代表音声のパス（全サンプルで共通の参照音声）。",
+        help="話者代表音声のパス（全サンプルで共通の参照音声）。WAV 以外も自動変換する。",
     )
     parser.add_argument(
         "--output",

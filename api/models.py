@@ -5,11 +5,12 @@ TTS モデル管理モジュール
         シングルトンとして保持する。API ルートから参照して使い回す。
 - 対象: api/ 配下のルートモジュール
 - 関連: Issue #32 — FastAPI REST API サーバー実装
+         Issue #39 — 推論エンジン最適化（最終目標: TensorRT / vLLM-Omni）
          docs/v2-design.md — 対応組み合わせマトリクス
 
 作成者: 宗廣 颯真
 作成日: 2026-04-14
-最終更新者: 宗廣 颯山
+最終更新者: 宗廣 颯真
 最終更新日: 2026-04-14
 """
 
@@ -51,13 +52,23 @@ def load_all_models() -> None:
     for model_type, model_id in MODEL_IDS.items():
         logger.info("Loading %s (%s)...", model_type, model_id)
         model_path = ensure_model_downloaded(model_id)
-        _models[model_type] = Qwen3TTSModel.from_pretrained(
+        wrapper = Qwen3TTSModel.from_pretrained(
             model_path,
             device_map=device,
             dtype=torch.float16,
             low_cpu_mem_usage=True,
             max_memory={0: "60GiB"},
         )
+
+        # torch.compile で推論グラフを最適化する（Issue #39 Step 1）。
+        # 最終目標は TensorRT または vLLM-Omni への移行だが、
+        # 現段階では compile が最小コストで最大の効果を得られる。
+        # 初回推論時にコンパイルが走るため最初の1リクエストのみ遅延が発生する。
+        if device != "cpu":
+            wrapper.model = torch.compile(wrapper.model)
+            logger.info("  %s: torch.compile applied.", model_type)
+
+        _models[model_type] = wrapper
         logger.info("  %s loaded.", model_type)
 
     logger.info("All models ready.")

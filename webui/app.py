@@ -2,15 +2,15 @@
 Qwen3-TTS Gradio WebUI
 
 - 目的: FastAPI サーバーを経由して全 TTS 組み合わせを操作できる WebUI を提供する。
-        3 タブ構成: Voice Clone / Custom Voice / Voice Design
-- 対象: Issue #33 — Gradio WebUI 実装
+        4 タブ構成: Voice Clone / Custom Voice / Voice Design / プロファイル管理
+- 対象: Issue #33 — Gradio WebUI 実装, Issue #47 — WebUI 話者プロファイル管理
 - 関連: docs/v2-design.md — WebUI タブ設計
          api/main.py — 呼び出す API サーバー
 
 作成者: 宗廣 颯真
 作成日: 2026-04-14
 最終更新者: 宗廣 颯真
-最終更新日: 2026-04-14
+最終更新日: 2026-04-15
 
 Usage:
     # docker compose で起動（API サーバーと同時に立ち上げる）
@@ -83,10 +83,40 @@ def _fetch_languages() -> list[str]:
 
 
 def _list_profiles() -> list[str]:
-    """speaker_profiles/ 内の .pt ファイル名一覧を返す。"""
+    """speaker_profiles/ 内の .pt ファイル名一覧を返す（起動時用: ファイルシステムを直接参照）。"""
     if not SPEAKER_PROFILES_DIR.exists():
         return []
     return sorted(p.name for p in SPEAKER_PROFILES_DIR.glob("*.pt"))
+
+
+def _fetch_profile_names() -> list[str]:
+    """API 経由でプロファイル名一覧を取得する（ランタイム更新用）。
+
+    Returns:
+        プロファイルファイル名のリスト。接続失敗時はファイルシステムにフォールバック。
+    """
+    try:
+        resp = requests.get(f"{API_BASE}/tts/voice-clone/profiles", timeout=5)
+        resp.raise_for_status()
+        return [p["name"] for p in resp.json().get("profiles", [])]
+    except Exception as exc:
+        logger.warning("Failed to fetch profiles from API, falling back to filesystem: %s", exc)
+        return _list_profiles()
+
+
+def _fetch_profiles_with_meta() -> list[list[str]]:
+    """API 経由でプロファイル一覧（名前 + 作成日時）を取得する。
+
+    Returns:
+        [[name, created_at], ...] の形式のリスト。
+    """
+    try:
+        resp = requests.get(f"{API_BASE}/tts/voice-clone/profiles", timeout=5)
+        resp.raise_for_status()
+        return [[p["name"], p["created_at"]] for p in resp.json().get("profiles", [])]
+    except Exception as exc:
+        logger.warning("Failed to fetch profile metadata: %s", exc)
+        return [[name, "—"] for name in _list_profiles()]
 
 
 def _save_wav_response(resp: requests.Response) -> str:
@@ -171,8 +201,16 @@ def voice_clone_generate(
         return None, f"エラー: {exc}"
 
 
-def _build_voice_clone_tab(languages: list[str], profiles: list[str]) -> None:
-    """Voice Clone タブを構築する。"""
+def _build_voice_clone_tab(languages: list[str], profiles: list[str]) -> gr.Dropdown:
+    """Voice Clone タブを構築する。
+
+    Args:
+        languages: 言語選択肢。
+        profiles: 起動時の話者プロファイル選択肢。
+
+    Returns:
+        プロファイル選択 Dropdown（プロファイル管理タブからの更新連携に使用）。
+    """
     with gr.Tab("Voice Clone"):
         gr.Markdown(
             "### 組み合わせ #1 / #2: 参照音声 または 保存済みプロファイル\n"
@@ -217,6 +255,8 @@ def _build_voice_clone_tab(languages: list[str], profiles: list[str]) -> None:
             inputs=[vc_text, vc_ref_audio, vc_ref_text, vc_profile, vc_language, vc_use_profile],
             outputs=[vc_output, vc_status],
         )
+
+    return vc_profile
 
 
 # ─── Tab 2: Custom Voice ──────────────────────────────────────────────────────
@@ -365,6 +405,192 @@ def _build_voice_design_tab(languages: list[str]) -> None:
         )
 
 
+# ─── Tab 4: プロファイル管理 ──────────────────────────────────────────────────
+
+
+def profile_create(
+    ref_audio_path: str | None,
+    profile_name: str,
+    ref_text: str,
+) -> tuple[str, list[list[str]], gr.Dropdown, gr.Dropdown]:
+    """プロファイル作成ボタン処理。
+
+    Args:
+        ref_audio_path: アップロードされた参照音声ファイルパス。
+        profile_name: 保存するプロファイル名（拡張子なし）。
+        ref_text: 参照音声の書き起こし（空文字 = x-vector モード）。
+
+    Returns:
+        (status, table_data, updated_vc_dropdown, updated_delete_dropdown)
+    """
+    if not ref_audio_path:
+        return "エラー: 参照音声をアップロードしてください。", _fetch_profiles_with_meta(), gr.update(), gr.update()
+    if not profile_name.strip():
+        return "エラー: プロファイル名を入力してください。", _fetch_profiles_with_meta(), gr.update(), gr.update()
+
+    try:
+        with open(ref_audio_path, "rb") as f:
+            resp = requests.post(
+                f"{API_BASE}/tts/voice-clone/profiles",
+                data={
+                    "profile_name": profile_name.strip(),
+                    "ref_text": ref_text.strip() or None,
+                },
+                files={"ref_audio": (pathlib.Path(ref_audio_path).name, f, "audio/wav")},
+                timeout=180,
+            )
+        if resp.status_code not in (200, 201):
+            return f"エラー {resp.status_code}: {resp.text}", _fetch_profiles_with_meta(), gr.update(), gr.update()
+
+        created_name = resp.json().get("profile_name", "")
+        new_names = _fetch_profile_names()
+        table = _fetch_profiles_with_meta()
+        return (
+            f"作成完了: {created_name}",
+            table,
+            gr.update(choices=new_names),
+            gr.update(choices=new_names),
+        )
+
+    except requests.exceptions.ConnectionError:
+        return (
+            f"API サーバーに接続できません ({API_BASE})。",
+            _fetch_profiles_with_meta(),
+            gr.update(),
+            gr.update(),
+        )
+    except Exception as exc:
+        logger.exception("profile_create failed")
+        return f"エラー: {exc}", _fetch_profiles_with_meta(), gr.update(), gr.update()
+
+
+def profile_delete(profile_name: str) -> tuple[str, list[list[str]], gr.Dropdown, gr.Dropdown]:
+    """プロファイル削除ボタン処理。
+
+    Args:
+        profile_name: 削除するプロファイルファイル名（例: default.pt）。
+
+    Returns:
+        (status, table_data, updated_vc_dropdown, updated_delete_dropdown)
+    """
+    if not profile_name:
+        return "エラー: 削除するプロファイルを選択してください。", _fetch_profiles_with_meta(), gr.update(), gr.update()
+
+    try:
+        resp = requests.delete(f"{API_BASE}/tts/voice-clone/profiles/{profile_name}", timeout=10)
+        if resp.status_code == 404:
+            return (
+                f"プロファイルが見つかりません: {profile_name}",
+                _fetch_profiles_with_meta(),
+                gr.update(),
+                gr.update(),
+            )
+        if resp.status_code != 200:
+            return f"エラー {resp.status_code}: {resp.text}", _fetch_profiles_with_meta(), gr.update(), gr.update()
+
+        new_names = _fetch_profile_names()
+        table = _fetch_profiles_with_meta()
+        return (
+            f"削除完了: {profile_name}",
+            table,
+            gr.update(choices=new_names, value=None),
+            gr.update(choices=new_names, value=None),
+        )
+
+    except requests.exceptions.ConnectionError:
+        return (
+            f"API サーバーに接続できません ({API_BASE})。",
+            _fetch_profiles_with_meta(),
+            gr.update(),
+            gr.update(),
+        )
+    except Exception as exc:
+        logger.exception("profile_delete failed")
+        return f"エラー: {exc}", _fetch_profiles_with_meta(), gr.update(), gr.update()
+
+
+def profile_refresh() -> tuple[list[list[str]], gr.Dropdown, gr.Dropdown]:
+    """プロファイル一覧を再取得する。
+
+    Returns:
+        (table_data, updated_vc_dropdown, updated_delete_dropdown)
+    """
+    new_names = _fetch_profile_names()
+    table = _fetch_profiles_with_meta()
+    return table, gr.update(choices=new_names), gr.update(choices=new_names)
+
+
+def _build_profile_management_tab(vc_profile_dropdown: gr.Dropdown) -> None:
+    """プロファイル管理タブを構築する。
+
+    Args:
+        vc_profile_dropdown: Voice Clone タブのプロファイル選択 Dropdown（連携更新用）。
+    """
+    with gr.Tab("プロファイル管理"):
+        gr.Markdown(
+            "### 話者プロファイル作成・管理\n"
+            "参照音声（WAV/MP3/M4A）からプロファイル (.pt) を生成・保存します。\n"
+            "作成したプロファイルは **Voice Clone** タブで即座に使用できます。"
+        )
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("#### プロファイル作成")
+                pm_ref_audio = gr.Audio(
+                    label="参照音声（24kHz mono WAV 推奨、3〜10秒）",
+                    type="filepath",
+                )
+                pm_ref_text = gr.Textbox(
+                    label="参照音声の書き起こし（任意）",
+                    placeholder="空欄 → x-vector モード / 入力あり → ICL モード（声質向上）",
+                )
+                pm_profile_name = gr.Textbox(
+                    label="プロファイル名（英数字・_・- のみ）",
+                    placeholder="例: my_voice",
+                )
+                pm_create_btn = gr.Button("作成する", variant="primary")
+                pm_create_status = gr.Textbox(label="ステータス", interactive=False)
+
+            with gr.Column():
+                gr.Markdown("#### 保存済みプロファイル一覧")
+                pm_table = gr.Dataframe(
+                    headers=["プロファイル名", "作成日時 (UTC)"],
+                    datatype=["str", "str"],
+                    value=_fetch_profiles_with_meta(),
+                    interactive=False,
+                    label="保存済みプロファイル",
+                )
+                pm_delete_target = gr.Dropdown(
+                    choices=_fetch_profile_names(),
+                    label="削除するプロファイル",
+                    info="一覧から選択してください",
+                )
+                with gr.Row():
+                    pm_delete_btn = gr.Button("削除", variant="stop")
+                    pm_refresh_btn = gr.Button("一覧を更新")
+                pm_manage_status = gr.Textbox(label="ステータス", interactive=False)
+
+        # 作成ボタン → テーブル・削除 Dropdown・Voice Clone Dropdown を更新する
+        pm_create_btn.click(
+            fn=profile_create,
+            inputs=[pm_ref_audio, pm_profile_name, pm_ref_text],
+            outputs=[pm_create_status, pm_table, vc_profile_dropdown, pm_delete_target],
+        )
+
+        # 削除ボタン → テーブル・削除 Dropdown・Voice Clone Dropdown を更新する
+        pm_delete_btn.click(
+            fn=profile_delete,
+            inputs=[pm_delete_target],
+            outputs=[pm_manage_status, pm_table, vc_profile_dropdown, pm_delete_target],
+        )
+
+        # 一覧更新ボタン
+        pm_refresh_btn.click(
+            fn=profile_refresh,
+            inputs=[],
+            outputs=[pm_table, vc_profile_dropdown, pm_delete_target],
+        )
+
+
 # ─── アプリ組み立て ────────────────────────────────────────────────────────────
 
 
@@ -385,9 +611,10 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(title="Qwen3-TTS WebUI") as demo:
         gr.Markdown("# Qwen3-TTS WebUI\nAPI: `" + API_BASE + "`")
 
-        _build_voice_clone_tab(languages, profiles)
+        vc_profile_dropdown = _build_voice_clone_tab(languages, profiles)
         _build_custom_voice_tab(speakers, languages)
         _build_voice_design_tab(languages)
+        _build_profile_management_tab(vc_profile_dropdown)
 
     return demo
 

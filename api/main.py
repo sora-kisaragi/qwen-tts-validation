@@ -9,7 +9,7 @@ Qwen3-TTS FastAPI サーバー
 作成者: 宗廣 颯真
 作成日: 2026-04-14
 最終更新者: 宗廣 颯真
-最終更新日: 2026-04-14
+最終更新日: 2026-04-15
 
 Usage (inside container):
     uvicorn api.main:app --host 0.0.0.0 --port 7865
@@ -57,7 +57,7 @@ app = FastAPI(
         "| POST /tts/custom-voice | 組み込み話者（± instruct） | CustomVoice |\n"
         "| POST /tts/voice-design | instruct で声設計 | VoiceDesign |\n"
     ),
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 

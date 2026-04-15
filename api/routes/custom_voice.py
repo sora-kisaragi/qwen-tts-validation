@@ -20,7 +20,7 @@ import soundfile as sf
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from api.models import get_model
+from api.models import get_model_for_speaker
 from api.schemas import CustomVoiceRequest
 
 router = APIRouter()
@@ -46,12 +46,13 @@ def _wav_to_bytes(wav: np.ndarray, sample_rate: int) -> bytes:
     ),
 )
 async def custom_voice(req: CustomVoiceRequest) -> Response:
-    model = get_model("custom_voice")
+    # ファインチューニング済み話者の場合は対応モデルへルーティングする（Issue #36）
+    model, resolved_speaker = get_model_for_speaker(req.speaker)
 
     try:
         wavs, sample_rate = model.generate_custom_voice(
             text=req.text,
-            speaker=req.speaker,
+            speaker=resolved_speaker,
             language=req.language,
             instruct=req.instruct or None,
         )

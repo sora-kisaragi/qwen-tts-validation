@@ -23,10 +23,18 @@ Usage:
 import logging
 import os
 import pathlib
+import sys
 import tempfile
 
 import gradio as gr
 import requests
+
+# scripts/ を sys.path に追加して audio_utils を利用する
+_SCRIPTS_DIR = pathlib.Path(__file__).parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from audio_utils import ensure_wav_format  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -134,7 +142,12 @@ def voice_clone_generate(
         else:
             if not ref_audio_path:
                 return None, "エラー: 参照音声をアップロードしてください。"
-            with open(ref_audio_path, "rb") as f:
+            # 推奨スペック（24kHz, mono, WAV）でない場合は API 送信前に変換する
+            converted_path = ensure_wav_format(
+                pathlib.Path(ref_audio_path),
+                converted_dir=pathlib.Path(tempfile.gettempdir()) / "qwen_tts_converted",
+            )
+            with open(converted_path, "rb") as f:
                 resp = requests.post(
                     f"{API_BASE}/tts/voice-clone",
                     data={

@@ -45,6 +45,11 @@ services:
       - HF_HOME=/workspace/.cache/huggingface
       - TORCH_HOME=/workspace/.cache/torch
       - PYTORCH_ALLOC_CONF=expandable_segments:True
+      # ファインチューニング済みモデルの起動時ロード（Issue #36）
+      # 設定する場合: FINETUNE_MODEL_PATH=/workspace/finetune_output/epoch_4
+      #               FINETUNE_SPEAKER_NAME=my_voice
+      - FINETUNE_MODEL_PATH=${FINETUNE_MODEL_PATH:-}
+      - FINETUNE_SPEAKER_NAME=${FINETUNE_SPEAKER_NAME:-my_voice}
     ports:
       - "7865:7865"
     volumes:
@@ -87,6 +92,34 @@ services:
     depends_on:
       - api
     command: python3 webui/app.py
+
+  finetune:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen-tts-validation:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/workspace/.cache/huggingface
+      - TORCH_HOME=/workspace/.cache/torch
+      - PYTORCH_ALLOC_CONF=expandable_segments:True
+    volumes:
+      - ./scripts:/workspace/scripts:ro
+      # 公式スクリプト (prepare_data.py, sft_12hz.py) をホストに置いて mount する
+      - ./finetuning:/workspace/finetuning
+      # 学習データ (WAV + transcript.csv + raw/prepared JSONL)
+      - ./finetune_data:/workspace/finetune_data
+      # 学習済みチェックポイントの出力先
+      - ./finetune_output:/workspace/finetune_output
+      - hf_cache:/workspace/.cache/huggingface
+      - torch_cache:/workspace/.cache/torch
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    command: bash
 
 volumes:
   hf_cache:

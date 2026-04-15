@@ -17,7 +17,7 @@ Usage:
     docker compose up api webui
 
     # 単体で起動（API が別途起動済みの場合）
-    TTS_API_URL=http://localhost:8000 python3 webui/app.py
+    TTS_API_URL=http://localhost:7865 python3 webui/app.py
 """
 
 import logging
@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 # API サーバーの URL（環境変数で上書き可能）
-API_BASE = os.environ.get("TTS_API_URL", "http://localhost:8000")
+API_BASE = os.environ.get("TTS_API_URL", "http://localhost:7865")
 
 SPEAKER_PROFILES_DIR = pathlib.Path("/workspace/speaker_profiles")
 

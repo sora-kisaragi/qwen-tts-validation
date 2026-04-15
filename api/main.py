@@ -12,11 +12,11 @@ Qwen3-TTS FastAPI サーバー
 最終更新日: 2026-04-14
 
 Usage (inside container):
-    uvicorn api.main:app --host 0.0.0.0 --port 8000
+    uvicorn api.main:app --host 0.0.0.0 --port 7865
 
     # または docker compose
     docker compose run --service-ports qwen-tts \
-        uvicorn api.main:app --host 0.0.0.0 --port 8000
+        uvicorn api.main:app --host 0.0.0.0 --port 7865
 """
 
 import logging

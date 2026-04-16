@@ -86,6 +86,7 @@ services:
       - ./sample_audio:/workspace/sample_audio:ro
       - ./output:/workspace/output
       - ./speaker_profiles:/workspace/speaker_profiles
+      - ./finetune_data:/workspace/finetune_data
       - hf_cache:/workspace/.cache/huggingface
       - torch_cache:/workspace/.cache/torch
     working_dir: /workspace

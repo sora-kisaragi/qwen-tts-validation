@@ -2,15 +2,16 @@
 Qwen3-TTS Gradio WebUI
 
 - 目的: FastAPI サーバーを経由して全 TTS 組み合わせを操作できる WebUI を提供する。
-        4 タブ構成: Voice Clone / Custom Voice / Voice Design / プロファイル管理
-- 対象: Issue #33 — Gradio WebUI 実装, Issue #47 — WebUI 話者プロファイル管理
+        5 タブ構成: Voice Clone / Custom Voice / Voice Design / プロファイル管理 / データ収集
+- 対象: Issue #33 — Gradio WebUI 実装, Issue #46 — ファインチューニングデータ収集,
+         Issue #47 — WebUI 話者プロファイル管理
 - 関連: docs/v2-design.md — WebUI タブ設計
          api/main.py — 呼び出す API サーバー
 
 作成者: 宗廣 颯真
 作成日: 2026-04-14
 最終更新者: 宗廣 颯真
-最終更新日: 2026-04-15
+最終更新日: 2026-04-16
 
 Usage:
     # docker compose で起動（API サーバーと同時に立ち上げる）
@@ -20,9 +21,11 @@ Usage:
     TTS_API_URL=http://localhost:7865 python3 webui/app.py
 """
 
+import csv
 import logging
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -35,6 +38,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from audio_utils import ensure_wav_format  # noqa: E402
+from create_finetune_dataset import create_dataset as _run_create_dataset  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -43,6 +47,74 @@ logger = logging.getLogger(__name__)
 API_BASE = os.environ.get("TTS_API_URL", "http://localhost:7865")
 
 SPEAKER_PROFILES_DIR = pathlib.Path("/workspace/speaker_profiles")
+
+_FINETUNE_DATA_DIR = pathlib.Path("/workspace/finetune_data")
+_FINETUNE_WAVS_DIR = _FINETUNE_DATA_DIR / "wavs"
+_FINETUNE_OUTPUT_JSONL = _FINETUNE_DATA_DIR / "raw_data.jsonl"
+_FINETUNE_TRANSCRIPT_CSV = _FINETUNE_DATA_DIR / "transcript.csv"
+
+# ファインチューニングデータ収集用のプリセットテキスト（50 文）
+_PRESET_TEXTS: list[str] = [
+    # 挨拶・日常会話
+    "おはようございます。今日もよろしくお願いします。",
+    "こんにちは。最近いかがお過ごしですか？",
+    "こんばんは。今日は遅くなってしまいました。",
+    "ありがとうございました。またよろしくお願いいたします。",
+    "すみません、少しよろしいですか？",
+    "はじめまして。どうぞよろしくお願いします。",
+    "お疲れ様でした。ゆっくり休んでください。",
+    "大丈夫ですよ。心配しないでください。",
+    "少々お待ちください。すぐに参ります。",
+    "失礼いたします。お邪魔してもよろしいでしょうか。",
+    # 天気・自然
+    "今日の天気はとても良いですね。",
+    "明日は雨が降るかもしれません。",
+    "春になると桜がとても綺麗に咲きますね。",
+    "夏の夜空に花火が上がりました。",
+    "秋の紅葉はとても美しいです。",
+    # 買い物・食事
+    "この商品はいくらですか？",
+    "レシートをいただけますか？",
+    "今日の夕食は何にしましょうか。",
+    "このラーメンはとても美味しいです。",
+    "コーヒーを一杯いただけますか？",
+    # 仕事・学業
+    "会議は三時から始まります。",
+    "報告書を明日までに提出してください。",
+    "新しいプロジェクトが来月から始まります。",
+    "試験の結果はいかがでしたか？",
+    "この資料を確認していただけますか？",
+    # 交通・移動
+    "次の電車は何時ですか？",
+    "この道をまっすぐ行くと駅があります。",
+    "タクシーを呼んでいただけますか？",
+    "飛行機の時間に間に合いますか？",
+    "この電車は東京駅に停まりますか？",
+    # 感情・表現
+    "それは本当に素晴らしいですね。",
+    "少し考えさせてください。",
+    "とても楽しい時間を過ごしました。",
+    "残念ですが、今回は参加できません。",
+    "心配しないでください、大丈夫ですよ。",
+    # 説明・紹介
+    "こちらが新しいモデルになります。",
+    "この機能について説明させてください。",
+    "まず最初に、基本的な操作方法をご紹介します。",
+    "詳しくはマニュアルをご参照ください。",
+    "ご不明な点があれば、いつでもご連絡ください。",
+    # 長めの文
+    "昨日の会議では、新しいサービスの開発方針について活発な議論が行われました。",
+    "東京オリンピックは多くの人々に感動を与えた歴史的なイベントでした。",
+    "人工知能技術の発展により、私たちの生活は大きく変わりつつあります。",
+    "環境問題は現代社会が抱える最も重要な課題の一つです。",
+    "健康的な生活を送るためには、適度な運動とバランスの良い食事が大切です。",
+    # ナレーション風
+    "本日はお集まりいただきありがとうございます。",
+    "それでは、発表を始めさせていただきます。",
+    "ご静聴ありがとうございました。",
+    "以上で説明を終わります。",
+    "ご質問はございますか？",
+]
 
 
 # ─── API クライアントヘルパー ──────────────────────────────────────────────────
@@ -591,6 +663,325 @@ def _build_profile_management_tab(vc_profile_dropdown: gr.Dropdown) -> None:
         )
 
 
+# ─── Tab 5: ファインチューニングデータ収集 ──────────────────────────────────────
+
+
+def _make_finetune_table(texts: list[str], audio_map: dict) -> list[list]:
+    """ファインチューニングデータ収集タブ用のテーブルデータを生成する。
+
+    Args:
+        texts: テキスト一覧。
+        audio_map: {row_index: audio_path} の辞書。
+
+    Returns:
+        [[No., テキスト, 登録済み], ...] 形式のリスト。
+    """
+    return [[i + 1, text, "✅" if i in audio_map else "—"] for i, text in enumerate(texts)]
+
+
+def load_preset_texts() -> tuple[list[list], list[str]]:
+    """プリセットテキスト（50 文）をテーブルと State にロードする。
+
+    Returns:
+        (table_data, texts) のタプル。
+    """
+    return _make_finetune_table(_PRESET_TEXTS, {}), list(_PRESET_TEXTS)
+
+
+def load_csv_texts(csv_path: str | None) -> tuple[str, list[list], list[str]]:
+    """CSV ファイルからテキスト一覧を読み込む。
+
+    対応フォーマット:
+        - 1 列形式（ヘッダーなし）: テキストのみ
+        - 2 列形式: filename,text（先頭列は無視して末尾列をテキストとして使用）
+
+    Args:
+        csv_path: アップロードされた CSV ファイルのパス。
+
+    Returns:
+        (status, table_data, texts) のタプル。
+    """
+    if not csv_path:
+        return "エラー: CSV ファイルをアップロードしてください。", [], []
+
+    texts: list[str] = []
+    try:
+        with open(str(csv_path), encoding="utf-8") as f:
+            reader = csv.reader(f)
+            for lineno, row in enumerate(reader, start=1):
+                # ヘッダー行を自動スキップ（末尾列が "text" 等の場合）
+                if lineno == 1 and row and row[-1].strip().lower() in ("text", "テキスト", "script"):
+                    continue
+                if not row:
+                    continue
+                # 複数列の場合は末尾列をテキストとして扱う（1 列でも機能する）
+                text = row[-1].strip()
+                if text:
+                    texts.append(text)
+    except Exception as exc:
+        logger.exception("load_csv_texts failed")
+        return f"エラー: {exc}", [], []
+
+    if not texts:
+        return "CSV に有効なテキストが見つかりませんでした。", [], []
+
+    return f"読み込み完了: {len(texts)} 件", _make_finetune_table(texts, {}), texts
+
+
+def register_audio_entry(
+    row_num: int,
+    audio_path: str | None,
+    texts: list[str],
+    audio_map: dict,
+) -> tuple[str, list[list], dict, str | None]:
+    """指定した行番号に音声ファイルを登録する。
+
+    音声は推奨スペック（24kHz mono WAV）に変換してから保存する。
+    保存先: _FINETUNE_WAVS_DIR / "{row_idx:03d}.wav"
+
+    Args:
+        row_num: 登録する行番号（1 始まり）。
+        audio_path: アップロードされた音声ファイルのパス。
+        texts: テキスト一覧（gr.State）。
+        audio_map: {row_index: audio_path} の辞書（gr.State）。
+
+    Returns:
+        (status, table_data, updated_audio_map, preview_audio_path) のタプル。
+    """
+    if not texts:
+        return "エラー: テキストを読み込んでください。", [], audio_map, None
+    if not audio_path:
+        return (
+            "エラー: 音声ファイルをアップロードしてください。",
+            _make_finetune_table(texts, audio_map),
+            audio_map,
+            None,
+        )
+
+    row_idx = int(row_num) - 1  # 1 始まり → 0 始まりに変換
+    if row_idx < 0 or row_idx >= len(texts):
+        return (
+            f"エラー: 行番号は 1〜{len(texts)} の範囲で入力してください。",
+            _make_finetune_table(texts, audio_map),
+            audio_map,
+            None,
+        )
+
+    try:
+        _FINETUNE_WAVS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # 推奨スペック（24kHz mono WAV）に変換してから保存する
+        src_path = pathlib.Path(audio_path)
+        converted_dir = pathlib.Path(tempfile.gettempdir()) / "qwen_tts_finetune_converted"
+        wav_path = ensure_wav_format(src_path, converted_dir=converted_dir)
+
+        dest_path = _FINETUNE_WAVS_DIR / f"{row_idx:03d}.wav"
+        shutil.copy2(str(wav_path), str(dest_path))
+
+        # 変換で中間ファイルが生成された場合は削除する
+        if wav_path != src_path:
+            wav_path.unlink(missing_ok=True)
+
+        new_audio_map = dict(audio_map)
+        new_audio_map[row_idx] = str(dest_path)
+        table = _make_finetune_table(texts, new_audio_map)
+        return f"登録完了: 行 {int(row_num)} — {texts[row_idx][:30]}…", table, new_audio_map, str(dest_path)
+
+    except Exception as exc:
+        logger.exception("register_audio_entry failed")
+        return f"エラー: {exc}", _make_finetune_table(texts, audio_map), audio_map, None
+
+
+def generate_finetune_dataset(
+    texts: list[str],
+    audio_map: dict,
+    ref_audio_path: str | None,
+    language: str,
+) -> tuple[str, str | None]:
+    """ファインチューニング用 raw JSONL データセットを生成する。
+
+    登録済み音声とテキストから transcript.csv を作成し、
+    create_finetune_dataset.create_dataset() を呼び出して JSONL を生成する。
+
+    Args:
+        texts: テキスト一覧（gr.State）。
+        audio_map: {row_index: audio_path} の辞書（gr.State）。
+        ref_audio_path: 話者代表音声のパス（全サンプルで共通）。
+        language: 言語指定（例: japanese, auto）。
+
+    Returns:
+        (status, jsonl_file_path) のタプル。jsonl_file_path は成功時のみ非 None。
+    """
+    if not texts:
+        return "エラー: テキストを読み込んでください。", None
+    if not audio_map:
+        return "エラー: 少なくとも 1 件以上の音声を登録してください。", None
+    if not ref_audio_path:
+        return "エラー: 話者代表音声をアップロードしてください。", None
+
+    _FINETUNE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _FINETUNE_WAVS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # audio_map のキーは gr.State 経由で int または str になり得るため int に統一する
+    registered = sorted((int(k), v) for k, v in audio_map.items())
+
+    try:
+        # 登録済み行のみ transcript.csv に書き出す
+        with _FINETUNE_TRANSCRIPT_CSV.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            for row_idx, audio_path in registered:
+                filename = pathlib.Path(audio_path).name
+                writer.writerow([filename, texts[row_idx]])
+
+        n_written = _run_create_dataset(
+            wav_dir=_FINETUNE_WAVS_DIR,
+            transcript_path=_FINETUNE_TRANSCRIPT_CSV,
+            ref_audio_path=pathlib.Path(ref_audio_path),
+            output_path=_FINETUNE_OUTPUT_JSONL,
+            language=language,
+        )
+        return f"生成完了: {n_written} 件 → {_FINETUNE_OUTPUT_JSONL}", str(_FINETUNE_OUTPUT_JSONL)
+
+    except SystemExit as exc:
+        # create_dataset() 内の sys.exit() を捕捉してエラーメッセージとして返す
+        return f"エラー: データセット生成に失敗しました。ログを確認してください（exit code: {exc.code}）。", None
+    except Exception as exc:
+        logger.exception("generate_finetune_dataset failed")
+        return f"エラー: {exc}", None
+
+
+def _build_finetune_tab(languages: list[str]) -> None:
+    """ファインチューニングデータ収集タブを構築する。
+
+    Args:
+        languages: 言語選択肢。
+    """
+    with gr.Tab("データ収集"):
+        gr.Markdown(
+            "### ファインチューニング用データ収集\n"
+            "テキストと音声を対応付けて fine-tuning 用データセット（raw JSONL）を作成します。\n"
+            "生成した JSONL は `finetuning/prepare_data.py` に渡して学習データに変換します。"
+        )
+
+        # テキスト一覧と登録済み音声マップを State として保持する
+        ft_texts = gr.State([])
+        ft_audio_map = gr.State({})
+
+        # ── テキスト管理 ──────────────────────────────────────────────────────
+        with gr.Accordion("テキスト管理", open=True):
+            with gr.Row():
+                ft_preset_btn = gr.Button("プリセットを読み込む（50 文）", variant="secondary")
+            with gr.Row():
+                ft_csv_file = gr.File(
+                    label="CSV ファイル（1 列: テキスト）",
+                    file_types=[".csv", ".txt"],
+                )
+                ft_csv_load_btn = gr.Button("CSV を読み込む", variant="secondary")
+            ft_csv_status = gr.Textbox(label="読み込みステータス", interactive=False, show_label=False)
+            with gr.Accordion("CSV フォーマット", open=False):
+                gr.Markdown(
+                    "**1 列形式**（テキストのみ）:\n"
+                    "```\nおはようございます。\nこんにちは。\n```\n\n"
+                    "**2 列形式**（1 列目は無視、2 列目をテキストとして使用）:\n"
+                    "```\n001.wav,おはようございます。\n002.wav,こんにちは。\n```\n\n"
+                    "**推奨録音スペック**: 24kHz mono WAV、1〜30 秒（推奨 3〜15 秒）"
+                )
+
+        # ── セリフ一覧 + 音声登録 ────────────────────────────────────────────
+        with gr.Row():
+            with gr.Column(scale=3):
+                ft_table = gr.Dataframe(
+                    headers=["No.", "テキスト", "登録済み"],
+                    datatype=["number", "str", "str"],
+                    value=[],
+                    interactive=False,
+                    label="セリフ一覧",
+                    wrap=True,
+                )
+
+            with gr.Column(scale=2):
+                gr.Markdown("#### 音声を登録する")
+                ft_row_num = gr.Number(
+                    label="行番号 (No.)",
+                    value=1,
+                    precision=0,
+                    minimum=1,
+                    step=1,
+                )
+                ft_reg_audio = gr.Audio(
+                    label="音声ファイル（WAV / MP3 / M4A）",
+                    type="filepath",
+                )
+                ft_reg_btn = gr.Button("登録する", variant="primary")
+                ft_reg_status = gr.Textbox(label="登録ステータス", interactive=False, show_label=False)
+                ft_preview = gr.Audio(label="登録音声プレビュー", type="filepath", interactive=False)
+
+        # ── データセット生成 ──────────────────────────────────────────────────
+        gr.Markdown("---")
+        gr.Markdown("#### データセット生成")
+        with gr.Row():
+            with gr.Column():
+                ft_ref_audio = gr.Audio(
+                    label="話者代表音声（ref_audio）",
+                    info="全サンプル共通の参照音声として使用する代表音声（24kHz mono WAV 推奨、3〜10 秒）",
+                    type="filepath",
+                )
+                ft_language = gr.Dropdown(
+                    choices=languages,
+                    value="japanese",
+                    label="言語",
+                )
+                ft_generate_btn = gr.Button("JSONL を生成する", variant="primary")
+
+            with gr.Column():
+                ft_gen_status = gr.Textbox(label="生成ステータス", interactive=False)
+                ft_output_file = gr.File(label="生成された JSONL ファイル（ダウンロード）", interactive=False)
+
+        with gr.Accordion("次のステップ", open=False):
+            gr.Markdown(
+                "生成した `raw_data.jsonl` を公式スクリプトで音声コードに変換してからファインチューニングします。\n\n"
+                "**STEP 2: 音声コードへの変換**\n"
+                "```bash\n"
+                "docker compose run finetune python3 finetuning/prepare_data.py \\\n"
+                "    --input_jsonl finetune_data/raw_data.jsonl \\\n"
+                "    --output_jsonl finetune_data/prepared_data.jsonl\n"
+                "```\n\n"
+                "**STEP 3: ファインチューニング**\n"
+                "```bash\n"
+                "docker compose run finetune python3 finetuning/sft_12hz.py \\\n"
+                "    --train_jsonl finetune_data/prepared_data.jsonl \\\n"
+                "    --output_model_path finetune_output/ \\\n"
+                "    --speaker_name my_voice \\\n"
+                "    --num_epochs 5\n"
+                "```"
+            )
+
+        # ── イベントハンドラー ────────────────────────────────────────────────
+        ft_preset_btn.click(
+            fn=load_preset_texts,
+            inputs=[],
+            outputs=[ft_table, ft_texts],
+        )
+
+        ft_csv_load_btn.click(
+            fn=load_csv_texts,
+            inputs=[ft_csv_file],
+            outputs=[ft_csv_status, ft_table, ft_texts],
+        )
+
+        ft_reg_btn.click(
+            fn=register_audio_entry,
+            inputs=[ft_row_num, ft_reg_audio, ft_texts, ft_audio_map],
+            outputs=[ft_reg_status, ft_table, ft_audio_map, ft_preview],
+        )
+
+        ft_generate_btn.click(
+            fn=generate_finetune_dataset,
+            inputs=[ft_texts, ft_audio_map, ft_ref_audio, ft_language],
+            outputs=[ft_gen_status, ft_output_file],
+        )
+
+
 # ─── アプリ組み立て ────────────────────────────────────────────────────────────
 
 
@@ -615,6 +1006,7 @@ def build_app() -> gr.Blocks:
         _build_custom_voice_tab(speakers, languages)
         _build_voice_design_tab(languages)
         _build_profile_management_tab(vc_profile_dropdown)
+        _build_finetune_tab(languages)
 
     return demo
 
